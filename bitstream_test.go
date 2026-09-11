@@ -70,7 +70,7 @@ func TestBitFieldsUseConfiguredBitOrder(t *testing.T) {
 				t.Fatalf("wire = % x, want % x", got, test.wire)
 			}
 
-			reader := NewReaderFromBytes(test.wire, WithBitOrder(test.order))
+			reader := NewReader(bytes.NewReader(test.wire), WithBitOrder(test.order))
 			for _, field := range test.fields {
 				got, err := reader.ReadBits(field.count)
 				if err != nil {
@@ -122,7 +122,7 @@ func TestBitOrderAndByteOrderAreIndependent(t *testing.T) {
 				t.Fatalf("wire = % x, want % x", got, test.wire)
 			}
 
-			reader := NewReaderFromBytes(test.wire, WithBitOrder(test.bitOrder), WithByteOrder(test.byteOrder))
+			reader := NewReader(bytes.NewReader(test.wire), WithBitOrder(test.bitOrder), WithByteOrder(test.byteOrder))
 			prefix, err := reader.ReadBits(3)
 			if err != nil {
 				t.Fatalf("ReadBits: %v", err)
@@ -151,7 +151,7 @@ func TestByteOrderAliases(t *testing.T) {
 }
 
 func TestScalarByteOrderOverrides(t *testing.T) {
-	if order := NewReaderFromBytes(nil).ByteOrder(); order != binary.BigEndian {
+	if order := NewReader(bytes.NewReader(nil)).ByteOrder(); order != binary.BigEndian {
 		t.Fatalf("default Reader byte order = %T, want binary.BigEndian", order)
 	}
 	if order := NewWriter(io.Discard).ByteOrder(); order != binary.BigEndian {
@@ -176,7 +176,7 @@ func TestScalarByteOrderOverrides(t *testing.T) {
 		t.Fatalf("wire = % x, want % x", output.Bytes(), want)
 	}
 
-	reader := NewReaderFromBytes(output.Bytes(), WithByteOrder(binary.LittleEndian))
+	reader := NewReader(bytes.NewReader(output.Bytes()), WithByteOrder(binary.LittleEndian))
 	if order := reader.ByteOrder(); order != binary.LittleEndian {
 		t.Fatalf("Reader byte order = %T, want binary.LittleEndian", order)
 	}
@@ -215,7 +215,7 @@ func TestByteIOWorksAtUnalignedPositions(t *testing.T) {
 				t.Fatalf("wire = % x, want % x", got, test.wire)
 			}
 
-			reader := NewReaderFromBytes(test.wire, WithBitOrder(test.order))
+			reader := NewReader(bytes.NewReader(test.wire), WithBitOrder(test.order))
 			prefix, err := reader.ReadBits(3)
 			if err != nil {
 				t.Fatalf("ReadBits: %v", err)
@@ -237,7 +237,7 @@ func TestByteIOWorksAtUnalignedPositions(t *testing.T) {
 func TestBitsRemaining(t *testing.T) {
 	for _, order := range []BitOrder{MSBFirst, LSBFirst} {
 		t.Run(orderName(order), func(t *testing.T) {
-			reader := NewReaderFromBytes([]byte{0xb5, 0x79}, WithBitOrder(order))
+			reader := NewReader(bytes.NewReader([]byte{0xb5, 0x79}), WithBitOrder(order))
 			if remaining, err := reader.BitsRemaining(); err != nil || remaining != 16 {
 				t.Fatalf("initial BitsRemaining = (%d, %v), want (16, nil)", remaining, err)
 			}
@@ -280,7 +280,7 @@ func TestReaderFork(t *testing.T) {
 	for _, order := range []BitOrder{MSBFirst, LSBFirst} {
 		t.Run(orderName(order), func(t *testing.T) {
 			reader := NewReader(
-				bytes.NewBuffer([]byte{0x96, 0x3c, 0xa5, 0x5a}),
+				bytes.NewReader([]byte{0x96, 0x3c, 0xa5, 0x5a}),
 				WithBitOrder(order),
 				WithByteOrder(LittleEndian),
 			)
@@ -288,7 +288,10 @@ func TestReaderFork(t *testing.T) {
 				t.Fatalf("ReadBits prefix: %v", err)
 			}
 
-			fork := reader.Fork()
+			fork, err := reader.Fork()
+			if err != nil {
+				t.Fatalf("Fork: %v", err)
+			}
 			if got := fork.BitPosition(); got != 3 {
 				t.Fatalf("fork BitPosition = %d, want 3", got)
 			}
@@ -329,7 +332,10 @@ func TestReaderFork(t *testing.T) {
 				t.Fatalf("independent ReadByte values = (%#x, %#x), want (0xa5, 0xa5)", readerByte, forkByte)
 			}
 
-			branch := fork.Fork()
+			branch, err := fork.Fork()
+			if err != nil {
+				t.Fatalf("fork Fork: %v", err)
+			}
 			branchByte, err := branch.ReadByte()
 			if err != nil {
 				t.Fatalf("branch ReadByte: %v", err)
@@ -348,8 +354,11 @@ func TestReaderFork(t *testing.T) {
 		})
 	}
 
-	reader := NewReaderFromBytes([]byte{0x12, 0x34}, WithByteOrder(LittleEndian))
-	fork := reader.Fork()
+	reader := NewReader(bytes.NewReader([]byte{0x12, 0x34}), WithByteOrder(LittleEndian))
+	fork, err := reader.Fork()
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
 	if value, err := fork.ReadUint16(); err != nil || value != 0x3412 {
 		t.Fatalf("fork ReadUint16 = (%#x, %v), want (0x3412, nil)", value, err)
 	}
@@ -359,11 +368,14 @@ func TestReaderFork(t *testing.T) {
 }
 
 func TestReaderForkPreservesBitsRemaining(t *testing.T) {
-	reader := NewReaderFromBytes([]byte{0x96, 0x3c, 0xa5})
+	reader := NewReader(bytes.NewReader([]byte{0x96, 0x3c, 0xa5}))
 	if _, err := reader.ReadBits(3); err != nil {
 		t.Fatalf("ReadBits prefix: %v", err)
 	}
-	fork := reader.Fork()
+	fork, err := reader.Fork()
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
 
 	for name, current := range map[string]*Reader{"reader": reader, "fork": fork} {
 		if remaining, err := current.BitsRemaining(); err != nil || remaining != 21 {
@@ -386,7 +398,7 @@ func TestReaderForkAndSkip(t *testing.T) {
 	for _, order := range []BitOrder{MSBFirst, LSBFirst} {
 		t.Run(orderName(order), func(t *testing.T) {
 			data := []byte{0x96, 0x3c, 0xa5}
-			reader := NewReaderFromBytes(data, WithBitOrder(order))
+			reader := NewReader(bytes.NewReader(data), WithBitOrder(order))
 			if _, err := reader.ReadBits(3); err != nil {
 				t.Fatalf("ReadBits prefix: %v", err)
 			}
@@ -402,7 +414,7 @@ func TestReaderForkAndSkip(t *testing.T) {
 				t.Fatalf("reader BitPosition = %d, want 11", got)
 			}
 
-			wantFork := NewReaderFromBytes(data, WithBitOrder(order))
+			wantFork := NewReader(bytes.NewReader(data), WithBitOrder(order))
 			if _, err := wantFork.ReadBits(3); err != nil {
 				t.Fatalf("expected fork prefix: %v", err)
 			}
@@ -415,7 +427,7 @@ func TestReaderForkAndSkip(t *testing.T) {
 				t.Fatalf("fork ReadBits = (%#x, %v), want (%#x, nil)", forkValue, err, wantForkValue)
 			}
 
-			wantReader := NewReaderFromBytes(data, WithBitOrder(order))
+			wantReader := NewReader(bytes.NewReader(data), WithBitOrder(order))
 			if _, err := wantReader.ReadBits(3); err != nil {
 				t.Fatalf("expected reader prefix: %v", err)
 			}
@@ -434,7 +446,7 @@ func TestReaderForkAndSkip(t *testing.T) {
 	}
 
 	t.Run("zero bytes", func(t *testing.T) {
-		reader := NewReaderFromBytes([]byte{0xab})
+		reader := NewReader(bytes.NewReader([]byte{0xab}))
 		fork, err := reader.ForkAndSkip(0)
 		if err != nil {
 			t.Fatalf("ForkAndSkip: %v", err)
@@ -445,8 +457,8 @@ func TestReaderForkAndSkip(t *testing.T) {
 		if got := fork.BitPosition(); got != 0 {
 			t.Fatalf("fork BitPosition = %d, want 0", got)
 		}
-		if value, err := fork.ReadByte(); err != nil || value != 0xab {
-			t.Fatalf("fork ReadByte = (%#x, %v), want (0xab, nil)", value, err)
+		if _, err := fork.ReadByte(); !errors.Is(err, io.EOF) {
+			t.Fatalf("zero-length fork ReadByte error = %v, want io.EOF", err)
 		}
 		if value, err := reader.ReadByte(); err != nil || value != 0xab {
 			t.Fatalf("reader ReadByte = (%#x, %v), want (0xab, nil)", value, err)
@@ -456,27 +468,24 @@ func TestReaderForkAndSkip(t *testing.T) {
 
 func TestReaderForkAndSkipFailure(t *testing.T) {
 	t.Run("partial EOF", func(t *testing.T) {
-		reader := NewReader(bytes.NewBuffer([]byte{0xab}))
+		reader := NewReader(bytes.NewReader([]byte{0xab}))
 		fork, err := reader.ForkAndSkip(2)
 		if !errors.Is(err, io.ErrUnexpectedEOF) {
 			t.Fatalf("ForkAndSkip error = %v, want io.ErrUnexpectedEOF", err)
 		}
-		if got := reader.BitPosition(); got != 8 {
-			t.Fatalf("reader BitPosition = %d, want 8", got)
+		if fork != nil {
+			t.Fatalf("ForkAndSkip fork = %v, want nil", fork)
 		}
-		if got := fork.BitPosition(); got != 0 {
-			t.Fatalf("fork BitPosition = %d, want 0", got)
+		if got := reader.BitPosition(); got != 0 {
+			t.Fatalf("reader BitPosition = %d, want 0", got)
 		}
-		if value, err := fork.ReadByte(); err != nil || value != 0xab {
-			t.Fatalf("fork ReadByte = (%#x, %v), want (0xab, nil)", value, err)
-		}
-		if _, err := fork.ReadByte(); !errors.Is(err, io.EOF) {
-			t.Fatalf("fork ReadByte error = %v, want io.EOF", err)
+		if value, err := reader.ReadByte(); err != nil || value != 0xab {
+			t.Fatalf("reader ReadByte = (%#x, %v), want (0xab, nil)", value, err)
 		}
 	})
 
 	t.Run("byte-count overflow", func(t *testing.T) {
-		reader := NewReaderFromBytes([]byte{0xab})
+		reader := NewReader(bytes.NewReader([]byte{0xab}))
 		fork, err := reader.ForkAndSkip(^uint64(0)/8 + 1)
 		if !errors.Is(err, ErrBitCountOverflow) {
 			t.Fatalf("ForkAndSkip error = %v, want %v", err, ErrBitCountOverflow)
@@ -484,35 +493,29 @@ func TestReaderForkAndSkipFailure(t *testing.T) {
 		if got := reader.BitPosition(); got != 0 {
 			t.Fatalf("reader BitPosition = %d, want 0", got)
 		}
-		if value, err := fork.ReadByte(); err != nil || value != 0xab {
-			t.Fatalf("fork ReadByte = (%#x, %v), want (0xab, nil)", value, err)
+		if fork != nil {
+			t.Fatalf("ForkAndSkip fork = %v, want nil", fork)
+		}
+		if value, err := reader.ReadByte(); err != nil || value != 0xab {
+			t.Fatalf("reader ReadByte = (%#x, %v), want (0xab, nil)", value, err)
 		}
 	})
 }
 
-func TestReaderForkReplaysReadErrors(t *testing.T) {
-	injected := errors.New("injected read failure")
-	reader := NewReader(&errorAfterReader{data: []byte{0x80}, err: injected})
-	fork := reader.Fork()
-
-	if _, err := fork.ReadBits(9); !errors.Is(err, injected) {
-		t.Fatalf("fork ReadBits error = %v, want injected error", err)
+func TestReaderForkUnavailableForStreams(t *testing.T) {
+	reader := NewReader(bytes.NewBuffer([]byte{0x80}))
+	if fork, err := reader.Fork(); fork != nil || !errors.Is(err, ErrRandomAccessUnavailable) {
+		t.Fatalf("stream Fork = (%v, %v), want (nil, %v)", fork, err, ErrRandomAccessUnavailable)
 	}
-	if got := fork.BitPosition(); got != 8 {
-		t.Fatalf("fork BitPosition = %d, want 8", got)
-	}
-	if _, err := reader.ReadBits(9); !errors.Is(err, injected) {
-		t.Fatalf("reader ReadBits error = %v, want injected error", err)
-	}
-	if got := reader.BitPosition(); got != 8 {
-		t.Fatalf("reader BitPosition = %d, want 8", got)
+	if fork, err := reader.ForkAndSkip(0); fork != nil || !errors.Is(err, ErrRandomAccessUnavailable) {
+		t.Fatalf("stream ForkAndSkip = (%v, %v), want (nil, %v)", fork, err, ErrRandomAccessUnavailable)
 	}
 }
 
 func TestNilReaderFork(t *testing.T) {
 	var reader *Reader
-	if fork := reader.Fork(); fork != nil {
-		t.Fatalf("nil Reader Fork = %v, want nil", fork)
+	if fork, err := reader.Fork(); fork != nil || !errors.Is(err, ErrNilReader) {
+		t.Fatalf("nil Reader Fork = (%v, %v), want (nil, %v)", fork, err, ErrNilReader)
 	}
 	fork, err := reader.ForkAndSkip(0)
 	if fork != nil {
@@ -561,7 +564,7 @@ func TestReadBitsToSlice(t *testing.T) {
 
 	for _, order := range []BitOrder{MSBFirst, LSBFirst} {
 		t.Run(orderName(order), func(t *testing.T) {
-			zeroReader := NewReaderFromBytes([]byte{0xab}, WithBitOrder(order))
+			zeroReader := NewReader(bytes.NewReader([]byte{0xab}), WithBitOrder(order))
 			zero, err := zeroReader.ReadBitsToSlice(0)
 			if err != nil {
 				t.Fatalf("ReadBitsToSlice(0): %v", err)
@@ -589,7 +592,7 @@ func TestReadBitsToSlice(t *testing.T) {
 						t.Fatalf("Close: %v", err)
 					}
 
-					reader := NewReaderFromBytes(output.Bytes(), WithBitOrder(order))
+					reader := NewReader(bytes.NewReader(output.Bytes()), WithBitOrder(order))
 					got, err := reader.ReadBitsToSlice(test.bits)
 					if err != nil {
 						t.Fatalf("ReadBitsToSlice(%d): %v", test.bits, err)
@@ -634,7 +637,7 @@ func TestSliceReadersAtAlignedAndUnalignedPositions(t *testing.T) {
 					t.Fatalf("Close: %v", err)
 				}
 
-				reader := NewReaderFromBytes(output.Bytes(), WithBitOrder(order))
+				reader := NewReader(bytes.NewReader(output.Bytes()), WithBitOrder(order))
 				if unaligned {
 					if value, err := reader.ReadBits(3); err != nil || value != 0x5 {
 						t.Fatalf("ReadBits prefix = (%#x, %v), want (0x5, nil)", value, err)
@@ -660,7 +663,7 @@ func TestSliceReadersAtAlignedAndUnalignedPositions(t *testing.T) {
 }
 
 func TestSliceReaderShortReadAndOverflowBehavior(t *testing.T) {
-	bitReader := NewReaderFromBytes([]byte{0xab})
+	bitReader := NewReader(bytes.NewReader([]byte{0xab}))
 	if data, err := bitReader.ReadBitsToSlice(14); !bytes.Equal(data, []byte{0xab}) || !errors.Is(err, io.EOF) {
 		t.Fatalf("short ReadBitsToSlice = (% x, %v), want (ab, io.EOF)", data, err)
 	}
@@ -668,7 +671,7 @@ func TestSliceReaderShortReadAndOverflowBehavior(t *testing.T) {
 		t.Fatalf("short ReadBitsToSlice position = %d, want 8", got)
 	}
 
-	partialGroupReader := NewReaderFromBytes([]byte{0xff})
+	partialGroupReader := NewReader(bytes.NewReader([]byte{0xff}))
 	if _, err := partialGroupReader.ReadBits(4); err != nil {
 		t.Fatalf("ReadBits prefix: %v", err)
 	}
@@ -679,7 +682,7 @@ func TestSliceReaderShortReadAndOverflowBehavior(t *testing.T) {
 		t.Fatalf("short final group position = %d, want 8", got)
 	}
 
-	byteReader := NewReaderFromBytes([]byte{0xde, 0xad})
+	byteReader := NewReader(bytes.NewReader([]byte{0xde, 0xad}))
 	if data, err := byteReader.ReadBytesToSlice(3); !bytes.Equal(data, []byte{0xde, 0xad}) || !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("short ReadBytesToSlice = (% x, %v), want (de ad, io.ErrUnexpectedEOF)", data, err)
 	}
@@ -687,7 +690,7 @@ func TestSliceReaderShortReadAndOverflowBehavior(t *testing.T) {
 		t.Fatalf("short ReadBytesToSlice position = %d, want 16", got)
 	}
 
-	overflowReader := NewReaderFromBytes([]byte{0x80})
+	overflowReader := NewReader(bytes.NewReader([]byte{0x80}))
 	if _, err := overflowReader.ReadBytesToSlice(^uint64(0)); !errors.Is(err, ErrSliceLengthOverflow) {
 		t.Fatalf("overflow ReadBytesToSlice error = %v, want %v", err, ErrSliceLengthOverflow)
 	}
@@ -725,7 +728,7 @@ func TestMustSliceReaders(t *testing.T) {
 				t.Fatalf("Close: %v", err)
 			}
 
-			reader := NewReaderFromBytes(output.Bytes(), WithBitOrder(order))
+			reader := NewReader(bytes.NewReader(output.Bytes()), WithBitOrder(order))
 			if got := reader.MustReadBitsToSlice(14); !bytes.Equal(got, []byte{0xab, 0x15}) {
 				t.Fatalf("MustReadBitsToSlice = % x, want ab 15", got)
 			}
@@ -736,13 +739,13 @@ func TestMustSliceReaders(t *testing.T) {
 	}
 
 	assertPanicsWithError(t, io.EOF, func() {
-		NewReaderFromBytes(nil).MustReadBitsToSlice(1)
+		NewReader(bytes.NewReader(nil)).MustReadBitsToSlice(1)
 	})
 	assertPanicsWithError(t, io.ErrUnexpectedEOF, func() {
-		NewReaderFromBytes([]byte{0}).MustReadBytesToSlice(2)
+		NewReader(bytes.NewReader([]byte{0})).MustReadBytesToSlice(2)
 	})
 	assertPanicsWithError(t, ErrSliceLengthOverflow, func() {
-		NewReaderFromBytes(nil).MustReadBytesToSlice(^uint64(0))
+		NewReader(bytes.NewReader(nil)).MustReadBytesToSlice(^uint64(0))
 	})
 }
 
@@ -774,7 +777,7 @@ func TestAlignmentAndPadding(t *testing.T) {
 		t.Fatal("Writer is not byte-aligned after Close")
 	}
 
-	reader := NewReaderFromBytes([]byte{0xb5, 0xaa})
+	reader := NewReader(bytes.NewReader([]byte{0xb5, 0xaa}))
 	value, err := reader.ReadBits(3)
 	if err != nil {
 		t.Fatalf("ReadBits: %v", err)
@@ -816,7 +819,7 @@ func TestStringHelpers(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	reader := NewReaderFromBytes(output.Bytes())
+	reader := NewReader(bytes.NewReader(output.Bytes()))
 	if value, err := reader.ReadStringToLength(uint64(len(fixed))); err != nil || value != fixed {
 		t.Fatalf("ReadStringToLength = (%q, %v), want (%q, nil)", value, err, fixed)
 	}
@@ -824,7 +827,7 @@ func TestStringHelpers(t *testing.T) {
 		t.Fatalf("ReadStringToNull = (%q, %v), want (%q, nil)", value, err, nullTerminated)
 	}
 
-	emptyReader := NewReaderFromBytes([]byte{0})
+	emptyReader := NewReader(bytes.NewReader([]byte{0}))
 	if value, err := emptyReader.ReadStringToNull(); err != nil || value != "" {
 		t.Fatalf("empty ReadStringToNull = (%q, %v), want (\"\", nil)", value, err)
 	}
@@ -832,22 +835,22 @@ func TestStringHelpers(t *testing.T) {
 		t.Fatalf("empty ReadStringToNull position = %d, want 8", got)
 	}
 
-	zeroLengthReader := NewReaderFromBytes(nil)
+	zeroLengthReader := NewReader(bytes.NewReader(nil))
 	if value, err := zeroLengthReader.ReadStringToLength(0); err != nil || value != "" {
 		t.Fatalf("zero-length ReadStringToLength = (%q, %v), want (\"\", nil)", value, err)
 	}
 
-	partialNullReader := NewReaderFromBytes([]byte("partial"))
+	partialNullReader := NewReader(bytes.NewReader([]byte("partial")))
 	if value, err := partialNullReader.ReadStringToNull(); value != "partial" || !errors.Is(err, io.EOF) {
 		t.Fatalf("unterminated ReadStringToNull = (%q, %v), want (\"partial\", io.EOF)", value, err)
 	}
 
-	partialLengthReader := NewReaderFromBytes([]byte("part"))
+	partialLengthReader := NewReader(bytes.NewReader([]byte("part")))
 	if value, err := partialLengthReader.ReadStringToLength(5); value != "part" || !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("short ReadStringToLength = (%q, %v), want (\"part\", io.ErrUnexpectedEOF)", value, err)
 	}
 
-	fixedNullReader := NewReaderFromBytes([]byte{'d', 'e', 'm', 'o', 0, 'x', 'y', 'z', 0xa5})
+	fixedNullReader := NewReader(bytes.NewReader([]byte{'d', 'e', 'm', 'o', 0, 'x', 'y', 'z', 0xa5}))
 	if value, err := fixedNullReader.ReadStringToLength(8); err != nil || value != "demo" {
 		t.Fatalf("null-terminated ReadStringToLength = (%q, %v), want (\"demo\", nil)", value, err)
 	}
@@ -855,12 +858,12 @@ func TestStringHelpers(t *testing.T) {
 		t.Fatalf("ReadStringToLength did not consume its fixed-width field: ReadByte = (%#x, %v), want (0xa5, nil)", value, err)
 	}
 
-	partialFixedNullReader := NewReaderFromBytes([]byte{'d', 'e', 'm', 'o', 0})
+	partialFixedNullReader := NewReader(bytes.NewReader([]byte{'d', 'e', 'm', 'o', 0}))
 	if value, err := partialFixedNullReader.ReadStringToLength(8); value != "demo" || !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("short null-terminated ReadStringToLength = (%q, %v), want (\"demo\", io.ErrUnexpectedEOF)", value, err)
 	}
 
-	overflowReader := NewReaderFromBytes([]byte{0x80})
+	overflowReader := NewReader(bytes.NewReader([]byte{0x80}))
 	if _, err := overflowReader.ReadStringToLength(^uint64(0)); !errors.Is(err, ErrStringLengthOverflow) {
 		t.Fatalf("overflow ReadStringToLength error = %v, want %v", err, ErrStringLengthOverflow)
 	}
@@ -887,7 +890,7 @@ func TestStringHelpersAtUnalignedPositions(t *testing.T) {
 				t.Fatalf("Close: %v", err)
 			}
 
-			reader := NewReaderFromBytes(output.Bytes(), WithBitOrder(order))
+			reader := NewReader(bytes.NewReader(output.Bytes()), WithBitOrder(order))
 			if value, err := reader.ReadBits(3); err != nil || value != 0x5 {
 				t.Fatalf("ReadBits = (%#x, %v), want (0x5, nil)", value, err)
 			}
@@ -913,7 +916,7 @@ func TestMustStringHelpers(t *testing.T) {
 	}
 	writer.MustClose()
 
-	reader := NewReaderFromBytes(output.Bytes())
+	reader := NewReader(bytes.NewReader(output.Bytes()))
 	if value := reader.MustReadStringToNull(); value != "hello" {
 		t.Fatalf("MustReadStringToNull = %q, want \"hello\"", value)
 	}
@@ -922,10 +925,10 @@ func TestMustStringHelpers(t *testing.T) {
 	}
 
 	assertPanicsWithError(t, io.EOF, func() {
-		NewReaderFromBytes([]byte("unterminated")).MustReadStringToNull()
+		NewReader(bytes.NewReader([]byte("unterminated"))).MustReadStringToNull()
 	})
 	assertPanicsWithError(t, ErrStringLengthOverflow, func() {
-		NewReaderFromBytes(nil).MustReadStringToLength(^uint64(0))
+		NewReader(bytes.NewReader(nil)).MustReadStringToLength(^uint64(0))
 	})
 	assertPanicsWithError(t, io.ErrShortWrite, func() {
 		NewWriter(zeroWriter{}).MustWriteString("x")
@@ -973,7 +976,7 @@ func TestScalarHelpers(t *testing.T) {
 		t.Fatalf("scalar prefix = % x, want fe fe 12 34 c7 cf", prefix)
 	}
 
-	reader := NewReaderFromBytes(output.Bytes())
+	reader := NewReader(bytes.NewReader(output.Bytes()))
 	if value, err := reader.ReadUint8(); err != nil || value != 0xfe {
 		t.Fatalf("ReadUint8 = (%#x, %v), want (0xfe, nil)", value, err)
 	}
@@ -1058,7 +1061,7 @@ func TestMustReadWrappers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reader := NewReaderFromBytes(output.Bytes())
+	reader := NewReader(bytes.NewReader(output.Bytes()))
 	if !reader.MustReadBool() {
 		t.Fatal("MustReadBool = false, want true")
 	}
@@ -1108,10 +1111,10 @@ func TestMustReadWrappers(t *testing.T) {
 	}
 
 	assertPanicsWithError(t, io.EOF, func() {
-		NewReaderFromBytes(nil).MustReadByte()
+		NewReader(bytes.NewReader(nil)).MustReadByte()
 	})
 	assertPanicsWithError(t, ErrNilByteOrder, func() {
-		NewReaderFromBytes([]byte{0, 0}).MustReadUint16WithOrder(nil)
+		NewReader(bytes.NewReader([]byte{0, 0})).MustReadUint16WithOrder(nil)
 	})
 }
 
@@ -1142,7 +1145,7 @@ func TestMustWriteWrappers(t *testing.T) {
 	writer.MustWriteFloat64(math.Float64frombits(0x400921fb54442d18))
 	writer.MustClose()
 
-	reader := NewReaderFromBytes(output.Bytes())
+	reader := NewReader(bytes.NewReader(output.Bytes()))
 	if value, err := reader.ReadBits(3); err != nil || value != 0x7 {
 		t.Fatalf("ReadBits = (%#x, %v), want (0x7, nil)", value, err)
 	}
@@ -1200,7 +1203,7 @@ func TestMustWriteWrappers(t *testing.T) {
 }
 
 func TestSkipBitsAtUnalignedPosition(t *testing.T) {
-	reader := NewReaderFromBytes([]byte{0xf0, 0x0f, 0xaa})
+	reader := NewReader(bytes.NewReader([]byte{0xf0, 0x0f, 0xaa}))
 	if value, err := reader.ReadBits(3); err != nil || value != 0x7 {
 		t.Fatalf("ReadBits = (%#x, %v), want (0x7, nil)", value, err)
 	}
@@ -1253,7 +1256,7 @@ func TestValidationDoesNotChangeStreamState(t *testing.T) {
 		t.Fatalf("wire = % x, want empty", got)
 	}
 
-	reader := NewReaderFromBytes([]byte{0x80})
+	reader := NewReader(bytes.NewReader([]byte{0x80}))
 	for _, count := range []uint8{0, 65} {
 		if _, err := reader.ReadBits(count); !errors.Is(err, ErrInvalidBitCount) {
 			t.Fatalf("ReadBits(%d) error = %v, want %v", count, err, ErrInvalidBitCount)
@@ -1266,7 +1269,7 @@ func TestValidationDoesNotChangeStreamState(t *testing.T) {
 		t.Fatalf("ReadBits(1) = (%#x, %v), want (1, nil)", value, err)
 	}
 
-	invalidReader := NewReaderFromBytes([]byte{0xff}, WithBitOrder(BitOrder(99)))
+	invalidReader := NewReader(bytes.NewReader([]byte{0xff}), WithBitOrder(BitOrder(99)))
 	if _, err := invalidReader.ReadBool(); !errors.Is(err, ErrInvalidBitOrder) {
 		t.Fatalf("invalid Reader error = %v, want %v", err, ErrInvalidBitOrder)
 	}
@@ -1274,7 +1277,7 @@ func TestValidationDoesNotChangeStreamState(t *testing.T) {
 	if err := invalidWriter.WriteBool(true); !errors.Is(err, ErrInvalidBitOrder) {
 		t.Fatalf("invalid Writer error = %v, want %v", err, ErrInvalidBitOrder)
 	}
-	invalidByteOrderReader := NewReaderFromBytes([]byte{0, 0}, WithByteOrder(nil))
+	invalidByteOrderReader := NewReader(bytes.NewReader([]byte{0, 0}), WithByteOrder(nil))
 	if _, err := invalidByteOrderReader.ReadUint16(); !errors.Is(err, ErrNilByteOrder) {
 		t.Fatalf("invalid byte-order Reader error = %v, want %v", err, ErrNilByteOrder)
 	}
@@ -1330,7 +1333,7 @@ func TestReadBitsDistinguishesCleanAndPartialEOF(t *testing.T) {
 	for _, order := range []BitOrder{MSBFirst, LSBFirst} {
 		for _, test := range tests {
 			t.Run(orderName(order)+"/"+test.name, func(t *testing.T) {
-				reader := NewReaderFromBytes(test.data, WithBitOrder(order))
+				reader := NewReader(bytes.NewReader(test.data), WithBitOrder(order))
 				if test.prefix != 0 {
 					if _, err := reader.ReadBits(test.prefix); err != nil {
 						t.Fatalf("ReadBits(%d) prefix: %v", test.prefix, err)
@@ -1364,7 +1367,7 @@ func TestReadBitsPreservesNonEOFErrors(t *testing.T) {
 }
 
 func TestEOFAndWriterFailureBehavior(t *testing.T) {
-	reader := NewReaderFromBytes([]byte{0x80})
+	reader := NewReader(bytes.NewReader([]byte{0x80}))
 	if _, err := reader.ReadBits(9); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("ReadBits error = %v, want io.ErrUnexpectedEOF", err)
 	}
@@ -1412,7 +1415,7 @@ func TestRandomFieldRoundTrips(t *testing.T) {
 				t.Fatalf("Close: %v", err)
 			}
 
-			reader := NewReaderFromBytes(output.Bytes(), WithBitOrder(order))
+			reader := NewReader(bytes.NewReader(output.Bytes()), WithBitOrder(order))
 			for _, field := range fields {
 				value, err := reader.ReadBits(field.count)
 				if err != nil {

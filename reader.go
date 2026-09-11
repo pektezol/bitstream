@@ -3,6 +3,7 @@ package bitstream
 import (
 	"bytes"
 	"io"
+	"io/fs"
 	"math"
 )
 
@@ -11,145 +12,30 @@ import (
 // Reader is not safe for concurrent use. It implements io.Reader and
 // io.ByteReader. Its byte-oriented methods assemble the next eight stream
 // bits into each returned byte, so they work at non-byte-aligned positions.
+// When NewReader detects a bounded io.ReaderAt source, Reader uses ReadAt and
+// supports forks and peeks without changing the source's seek position.
 type Reader struct {
 	in        io.Reader
+	at        io.ReaderAt
 	order     BitOrder
 	byteOrder ByteOrder
 	current   byte
 	offset    uint8
 	hasByte   bool
 	position  uint64
+	limit     uint64
+	origin    int64
+	random    bool
 	initErr   error
 	single    [1]byte
 }
 
-// forkSource caches bytes read after a Reader is forked. Each fork has its own
-// forkCursor, which lets it replay cached bytes without advancing the source
-// used by the other forks.
-//
-// Reader is not safe for concurrent use, and neither is a fork group. Keeping
-// this state unsynchronized preserves that contract while allowing forks to be
-// advanced independently in sequence.
-type forkSource struct {
-	in     io.Reader
-	data   []byte
-	errors []forkReadError
+type sizedReader interface {
+	Size() int64
 }
 
-type forkReadError struct {
-	offset uint64
-	err    error
-}
-
-type forkCursor struct {
-	source    *forkSource
-	offset    uint64
-	nextError int
-}
-
-type remainingByteReader interface {
-	remainingBytes() (uint64, error)
-}
-
-func (cursor *forkCursor) clone() *forkCursor {
-	clone := *cursor
-	return &clone
-}
-
-func (cursor *forkCursor) Read(data []byte) (int, error) {
-	if len(data) == 0 {
-		return 0, nil
-	}
-
-	cursor.skipPastErrors()
-	if cursor.nextError < len(cursor.source.errors) {
-		readError := cursor.source.errors[cursor.nextError]
-		if readError.offset == cursor.offset {
-			cursor.nextError++
-			return 0, readError.err
-		}
-	}
-
-	buffered := uint64(len(cursor.source.data)) - cursor.offset
-	if buffered > 0 {
-		count := min(uint64(len(data)), buffered)
-		if cursor.nextError < len(cursor.source.errors) {
-			readError := cursor.source.errors[cursor.nextError]
-			if distance := readError.offset - cursor.offset; distance < count {
-				count = distance
-			}
-		}
-
-		start := int(cursor.offset)
-		end := start + int(count)
-		copy(data, cursor.source.data[start:end])
-		cursor.offset += count
-
-		if cursor.nextError < len(cursor.source.errors) {
-			readError := cursor.source.errors[cursor.nextError]
-			if readError.offset == cursor.offset {
-				cursor.nextError++
-				return int(count), readError.err
-			}
-		}
-		return int(count), nil
-	}
-
-	count, err := cursor.source.in.Read(data)
-	if count < 0 || count > len(data) {
-		return 0, errInvalidRead
-	}
-	if count > 0 {
-		cursor.source.data = append(cursor.source.data, data[:count]...)
-		cursor.offset += uint64(count)
-	}
-	if err != nil {
-		cursor.source.errors = append(cursor.source.errors, forkReadError{
-			offset: uint64(len(cursor.source.data)),
-			err:    err,
-		})
-		cursor.nextError++
-	}
-	return count, err
-}
-
-func (cursor *forkCursor) skipPastErrors() {
-	for cursor.nextError < len(cursor.source.errors) && cursor.source.errors[cursor.nextError].offset < cursor.offset {
-		cursor.nextError++
-	}
-}
-
-func (cursor *forkCursor) remainingBytes() (uint64, error) {
-	if cursor.offset > uint64(len(cursor.source.data)) {
-		return 0, ErrRemainingBitsUnavailable
-	}
-
-	seeker, ok := cursor.source.in.(io.Seeker)
-	if !ok {
-		return 0, ErrRemainingBitsUnavailable
-	}
-	current, err := seeker.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return 0, err
-	}
-	end, endErr := seeker.Seek(0, io.SeekEnd)
-	_, restoreErr := seeker.Seek(current, io.SeekStart)
-	if restoreErr != nil {
-		return 0, restoreErr
-	}
-	if endErr != nil {
-		return 0, endErr
-	}
-	if current < 0 || end < current {
-		return 0, ErrRemainingBitsUnavailable
-	}
-
-	remaining := uint64(len(cursor.source.data)) - cursor.offset
-	underlying := uint64(end - current)
-	if underlying > ^uint64(0)-remaining {
-		return 0, ErrBitCountOverflow
-	}
-	return remaining + underlying, nil
+type statReader interface {
+	Stat() (fs.FileInfo, error)
 }
 
 // NewReader returns a Reader that reads from in. Its defaults are MSBFirst and
@@ -159,12 +45,16 @@ func NewReader(in io.Reader, options ...Option) *Reader {
 	if err == nil && in == nil {
 		err = ErrNilReader
 	}
-	return &Reader{
+	reader := &Reader{
 		in:        in,
 		order:     config.bitOrder,
 		byteOrder: config.byteOrder,
 		initErr:   err,
 	}
+	if err == nil {
+		reader.initErr = reader.detectRandomAccess()
+	}
+	return reader
 }
 
 // NewReaderFromBytes returns a Reader over data. The data is not copied.
@@ -172,39 +62,71 @@ func NewReaderFromBytes(data []byte, options ...Option) *Reader {
 	return NewReader(bytes.NewReader(data), options...)
 }
 
-// Fork returns an independent copy of Reader at its current state. Reads from
-// either Reader do not advance the other. For a streaming source, bytes read
-// after the fork are retained so other forks can replay them. A Reader and its
-// forks must not be used concurrently.
-//
-// Fork returns nil when called on a nil Reader.
-func (reader *Reader) Fork() *Reader {
-	if reader == nil {
-		return nil
+// CanFork reports whether Fork is available. It returns false for nil,
+// unsuccessfully initialized, and forward-only Readers. Calling CanFork does
+// not consume input or otherwise change Reader's state.
+func (reader *Reader) CanFork() bool {
+	return reader != nil && reader.in != nil && reader.at != nil && reader.initErr == nil && reader.random
+}
+
+// CanPeek reports whether PeekBits is available. It has the same result as
+// CanFork and does not consume input or otherwise change Reader's state.
+func (reader *Reader) CanPeek() bool {
+	return reader.CanFork()
+}
+
+// Fork returns an independent Reader at the current bit position. Forks are
+// available only for bounded random-access sources. The source data must remain
+// unchanged while any Reader using it is active.
+func (reader *Reader) Fork() (*Reader, error) {
+	if err := reader.readable(); err != nil {
+		return nil, err
+	}
+	if !reader.random {
+		return nil, ErrRandomAccessUnavailable
+	}
+	fork := *reader
+	return &fork, nil
+}
+
+// ForkAndSkip returns a child limited to the next byteCount logical bytes and
+// advances Reader past those bytes. The operation is atomic: on error Reader is
+// unchanged and no child is returned.
+func (reader *Reader) ForkAndSkip(byteCount uint64) (*Reader, error) {
+	if err := reader.readable(); err != nil {
+		return nil, err
+	}
+	if !reader.random {
+		return nil, ErrRandomAccessUnavailable
+	}
+	if byteCount > ^uint64(0)/8 {
+		return nil, ErrBitCountOverflow
+	}
+	bitCount := byteCount * 8
+	if bitCount > reader.limit-reader.position {
+		return nil, io.ErrUnexpectedEOF
 	}
 
 	fork := *reader
-	if cursor, ok := reader.in.(*forkCursor); ok {
-		fork.in = cursor.clone()
-		return &fork
-	}
-	if reader.in == nil {
-		return &fork
-	}
-
-	source := &forkSource{in: reader.in}
-	reader.in = &forkCursor{source: source}
-	fork.in = &forkCursor{source: source}
-	return &fork
+	fork.limit = reader.position + bitCount
+	reader.advanceRandom(bitCount)
+	return &fork, nil
 }
 
-// ForkAndSkip returns an independent copy of Reader at its current state and
-// then skips byteCount logical bytes in the original Reader. If skipping fails,
-// the returned fork remains at the original position and the original Reader
-// remains advanced by the bytes or bits it consumed before the error.
-func (reader *Reader) ForkAndSkip(byteCount uint64) (*Reader, error) {
-	fork := reader.Fork()
-	return fork, reader.SkipBytes(byteCount)
+// PeekBits reads bitCount bits without changing Reader. It is available only
+// for bounded random-access sources.
+func (reader *Reader) PeekBits(bitCount uint8) (uint64, error) {
+	if err := reader.readable(); err != nil {
+		return 0, err
+	}
+	if bitCount == 0 || bitCount > 64 {
+		return 0, ErrInvalidBitCount
+	}
+	if !reader.random {
+		return 0, ErrRandomAccessUnavailable
+	}
+	peek := *reader
+	return peek.ReadBits(bitCount)
 }
 
 // ReadBool reads one bit and returns true for a set bit.
@@ -281,7 +203,10 @@ func (reader *Reader) Read(data []byte) (int, error) {
 		return 0, nil
 	}
 
-	if !reader.hasByte {
+	if !reader.hasByte && reader.position%8 == 0 {
+		if reader.random {
+			return reader.readRandom(data)
+		}
 		count, err := reader.in.Read(data)
 		if count < 0 || count > len(data) {
 			return 0, errInvalidRead
@@ -436,6 +361,9 @@ func (reader *Reader) SkipBits(bitCount uint64) error {
 	if err := reader.readable(); err != nil {
 		return err
 	}
+	if reader.random {
+		return reader.skipRandomBits(bitCount)
+	}
 
 	if reader.hasByte && bitCount > 0 {
 		remaining := uint64(8 - reader.offset)
@@ -476,7 +404,21 @@ func (reader *Reader) SkipBytes(byteCount uint64) error {
 // Align discards the unread bits in the current byte and returns their count.
 // If Reader is already byte-aligned, it returns zero.
 func (reader *Reader) Align() uint8 {
-	if reader == nil || !reader.hasByte {
+	if reader == nil || reader.position%8 == 0 {
+		return 0
+	}
+	if reader.random {
+		if reader.position >= reader.limit {
+			reader.clearCurrentByte()
+			return 0
+		}
+		toBoundary := uint64(8 - reader.position%8)
+		skipped := min(toBoundary, reader.limit-reader.position)
+		reader.position += skipped
+		reader.clearCurrentByte()
+		return uint8(skipped)
+	}
+	if !reader.hasByte {
 		return 0
 	}
 	skipped := 8 - reader.offset
@@ -495,19 +437,14 @@ func (reader *Reader) BitPosition() uint64 {
 }
 
 // BitsRemaining reports the number of unread stream bits through EOF without
-// consuming input. It includes unread bits in Reader's current buffered byte.
-// The underlying source must implement io.Seeker; otherwise it returns
-// ErrRemainingBitsUnavailable.
+// consuming input. Bounded random-access sources use their captured bounds;
+// other seekable sources are queried without consuming input.
 func (reader *Reader) BitsRemaining() (uint64, error) {
 	if err := reader.readable(); err != nil {
 		return 0, err
 	}
-	if source, ok := reader.in.(remainingByteReader); ok {
-		remainingBytes, err := source.remainingBytes()
-		if err != nil {
-			return 0, err
-		}
-		return reader.bitsRemainingFromBytes(remainingBytes)
+	if reader.random {
+		return reader.limit - reader.position, nil
 	}
 
 	seeker, ok := reader.in.(io.Seeker)
@@ -539,14 +476,18 @@ func (reader *Reader) bitsRemainingFromBytes(remainingBytes uint64) (uint64, err
 	}
 	remaining := remainingBytes * 8
 	if reader.hasByte {
-		remaining += uint64(8 - reader.offset)
+		buffered := uint64(8 - reader.offset)
+		if remaining > ^uint64(0)-buffered {
+			return 0, ErrBitCountOverflow
+		}
+		remaining += buffered
 	}
 	return remaining, nil
 }
 
 // ByteAligned reports whether Reader is positioned at a byte boundary.
 func (reader *Reader) ByteAligned() bool {
-	return reader == nil || !reader.hasByte
+	return reader == nil || reader.position%8 == 0
 }
 
 // BitOrder reports Reader's configured bit order.
@@ -719,12 +660,26 @@ func (reader *Reader) readBit() (bool, error) {
 	if err := reader.readable(); err != nil {
 		return false, err
 	}
+	if reader.random && reader.position >= reader.limit {
+		return false, io.EOF
+	}
 	if !reader.hasByte {
-		if _, err := io.ReadFull(reader.in, reader.single[:]); err != nil {
+		if reader.random {
+			count, err := reader.at.ReadAt(reader.single[:], reader.origin+int64(reader.position/8))
+			if count < 0 || count > len(reader.single) {
+				return false, errInvalidRead
+			}
+			if count != len(reader.single) {
+				if err == nil {
+					err = io.ErrUnexpectedEOF
+				}
+				return false, err
+			}
+		} else if _, err := io.ReadFull(reader.in, reader.single[:]); err != nil {
 			return false, err
 		}
 		reader.current = reader.single[0]
-		reader.offset = 0
+		reader.offset = uint8(reader.position % 8)
 		reader.hasByte = true
 	}
 
@@ -739,6 +694,64 @@ func (reader *Reader) readBit() (bool, error) {
 		reader.clearCurrentByte()
 	}
 	return value, nil
+}
+
+func (reader *Reader) readRandom(data []byte) (int, error) {
+	if reader.position >= reader.limit {
+		return 0, io.EOF
+	}
+
+	availableBytes := (reader.limit - reader.position) / 8
+	if availableBytes == 0 {
+		_, err := reader.ReadByte()
+		return 0, err
+	}
+	count := len(data)
+	if uint64(count) > availableBytes {
+		count = int(availableBytes)
+	}
+
+	read, err := reader.at.ReadAt(data[:count], reader.origin+int64(reader.position/8))
+	if read < 0 || read > count {
+		return 0, errInvalidRead
+	}
+	reader.position += uint64(read) * 8
+	return read, err
+}
+
+func (reader *Reader) skipRandomBits(bitCount uint64) error {
+	if bitCount == 0 {
+		return nil
+	}
+	if reader.position >= reader.limit {
+		return io.EOF
+	}
+
+	consumed := min(bitCount, reader.limit-reader.position)
+	reader.advanceRandom(consumed)
+	if consumed == bitCount {
+		return nil
+	}
+	if consumed == 0 {
+		return io.EOF
+	}
+	return io.ErrUnexpectedEOF
+}
+
+func (reader *Reader) advanceRandom(bitCount uint64) {
+	if bitCount == 0 {
+		return
+	}
+	next := reader.position + bitCount
+	if reader.hasByte {
+		byteStart := reader.position - uint64(reader.offset)
+		if next > byteStart && next < byteStart+8 {
+			reader.offset = uint8(next - byteStart)
+		} else {
+			reader.clearCurrentByte()
+		}
+	}
+	reader.position = next
 }
 
 func (reader *Reader) discardBytes(byteCount uint64) error {
@@ -762,4 +775,57 @@ func (reader *Reader) clearCurrentByte() {
 	reader.current = 0
 	reader.offset = 0
 	reader.hasByte = false
+}
+
+func (reader *Reader) detectRandomAccess() error {
+	at, ok := reader.in.(io.ReaderAt)
+	if !ok {
+		return nil
+	}
+
+	var size int64
+	if source, ok := reader.in.(sizedReader); ok {
+		size = source.Size()
+	} else {
+		source, ok := reader.in.(statReader)
+		if !ok {
+			return nil
+		}
+		info, err := source.Stat()
+		if err != nil {
+			return err
+		}
+		if info == nil {
+			return ErrInvalidSize
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		size = info.Size()
+	}
+	if size < 0 {
+		return ErrInvalidSize
+	}
+
+	origin := int64(0)
+	if seeker, ok := reader.in.(io.Seeker); ok {
+		current, err := seeker.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return err
+		}
+		origin = current
+	}
+	if origin < 0 || origin > size {
+		return ErrInvalidSize
+	}
+
+	available := uint64(size - origin)
+	if available > ^uint64(0)/8 {
+		return ErrBitCountOverflow
+	}
+	reader.at = at
+	reader.origin = origin
+	reader.limit = available * 8
+	reader.random = true
+	return nil
 }

@@ -32,6 +32,14 @@ var (
 	// consuming input.
 	ErrRemainingBitsUnavailable = errors.New("bitstream: remaining bits unavailable")
 
+	// ErrRandomAccessUnavailable is returned when Fork, ForkAndSkip, or
+	// PeekBits is called on a forward-only Reader.
+	ErrRandomAccessUnavailable = errors.New("bitstream: random access unavailable")
+
+	// ErrInvalidSize is returned when a random-access source reports an invalid
+	// size or current offset.
+	ErrInvalidSize = errors.New("bitstream: invalid source size")
+
 	// ErrClosed is returned when writing to a Writer after Close.
 	ErrClosed = errors.New("bitstream: writer is closed")
 

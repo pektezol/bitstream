@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"os"
 	"testing"
 )
 
@@ -67,6 +68,46 @@ func BenchmarkReadBits(b *testing.B) {
 				}
 			}
 		}
+	}
+}
+
+func BenchmarkReadBitsFile(b *testing.B) {
+	data := bytes.Repeat([]byte{0xa5, 0x5a, 0x3c, 0xc3}, benchmarkPayloadSize/4)
+	path := b.TempDir() + "/payload.bin"
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		b.Fatalf("WriteFile: %v", err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		b.Fatalf("Open: %v", err)
+	}
+	b.Cleanup(func() { _ = file.Close() })
+
+	for _, order := range []BitOrder{MSBFirst, LSBFirst} {
+		b.Run(benchmarkOrderName(order), func(b *testing.B) {
+			newReader := func() *Reader {
+				if _, err := file.Seek(0, io.SeekStart); err != nil {
+					b.Fatalf("Seek: %v", err)
+				}
+				return NewReader(file, WithBitOrder(order))
+			}
+
+			reader := newReader()
+			remaining := uint64(len(data)) * 8
+			b.ReportAllocs()
+			b.SetBytes(1)
+			b.ResetTimer()
+			for index := 0; index < b.N; index++ {
+				if remaining < 8 {
+					reader = newReader()
+					remaining = uint64(len(data)) * 8
+				}
+				if _, err := reader.ReadBits(8); err != nil {
+					b.Fatalf("ReadBits: %v", err)
+				}
+				remaining -= 8
+			}
+		})
 	}
 }
 

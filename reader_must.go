@@ -18,6 +18,16 @@ func (reader *Reader) MustReadBits(bitCount uint8) uint64 {
 	return value
 }
 
+// MustPeekBits reads bitCount bits without changing Reader and panics if the
+// bits cannot be read.
+func (reader *Reader) MustPeekBits(bitCount uint8) uint64 {
+	value, err := reader.PeekBits(bitCount)
+	if err != nil {
+		panic(err)
+	}
+	return value
+}
+
 // MustReadByte reads one byte and panics if it cannot be read.
 func (reader *Reader) MustReadByte() byte {
 	value, err := reader.ReadByte()
