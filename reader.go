@@ -23,6 +23,135 @@ type Reader struct {
 	single    [1]byte
 }
 
+// forkSource caches bytes read after a Reader is forked. Each fork has its own
+// forkCursor, which lets it replay cached bytes without advancing the source
+// used by the other forks.
+//
+// Reader is not safe for concurrent use, and neither is a fork group. Keeping
+// this state unsynchronized preserves that contract while allowing forks to be
+// advanced independently in sequence.
+type forkSource struct {
+	in     io.Reader
+	data   []byte
+	errors []forkReadError
+}
+
+type forkReadError struct {
+	offset uint64
+	err    error
+}
+
+type forkCursor struct {
+	source    *forkSource
+	offset    uint64
+	nextError int
+}
+
+type remainingByteReader interface {
+	remainingBytes() (uint64, error)
+}
+
+func (cursor *forkCursor) clone() *forkCursor {
+	clone := *cursor
+	return &clone
+}
+
+func (cursor *forkCursor) Read(data []byte) (int, error) {
+	if len(data) == 0 {
+		return 0, nil
+	}
+
+	cursor.skipPastErrors()
+	if cursor.nextError < len(cursor.source.errors) {
+		readError := cursor.source.errors[cursor.nextError]
+		if readError.offset == cursor.offset {
+			cursor.nextError++
+			return 0, readError.err
+		}
+	}
+
+	buffered := uint64(len(cursor.source.data)) - cursor.offset
+	if buffered > 0 {
+		count := min(uint64(len(data)), buffered)
+		if cursor.nextError < len(cursor.source.errors) {
+			readError := cursor.source.errors[cursor.nextError]
+			if distance := readError.offset - cursor.offset; distance < count {
+				count = distance
+			}
+		}
+
+		start := int(cursor.offset)
+		end := start + int(count)
+		copy(data, cursor.source.data[start:end])
+		cursor.offset += count
+
+		if cursor.nextError < len(cursor.source.errors) {
+			readError := cursor.source.errors[cursor.nextError]
+			if readError.offset == cursor.offset {
+				cursor.nextError++
+				return int(count), readError.err
+			}
+		}
+		return int(count), nil
+	}
+
+	count, err := cursor.source.in.Read(data)
+	if count < 0 || count > len(data) {
+		return 0, errInvalidRead
+	}
+	if count > 0 {
+		cursor.source.data = append(cursor.source.data, data[:count]...)
+		cursor.offset += uint64(count)
+	}
+	if err != nil {
+		cursor.source.errors = append(cursor.source.errors, forkReadError{
+			offset: uint64(len(cursor.source.data)),
+			err:    err,
+		})
+		cursor.nextError++
+	}
+	return count, err
+}
+
+func (cursor *forkCursor) skipPastErrors() {
+	for cursor.nextError < len(cursor.source.errors) && cursor.source.errors[cursor.nextError].offset < cursor.offset {
+		cursor.nextError++
+	}
+}
+
+func (cursor *forkCursor) remainingBytes() (uint64, error) {
+	if cursor.offset > uint64(len(cursor.source.data)) {
+		return 0, ErrRemainingBitsUnavailable
+	}
+
+	seeker, ok := cursor.source.in.(io.Seeker)
+	if !ok {
+		return 0, ErrRemainingBitsUnavailable
+	}
+	current, err := seeker.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, err
+	}
+	end, endErr := seeker.Seek(0, io.SeekEnd)
+	_, restoreErr := seeker.Seek(current, io.SeekStart)
+	if restoreErr != nil {
+		return 0, restoreErr
+	}
+	if endErr != nil {
+		return 0, endErr
+	}
+	if current < 0 || end < current {
+		return 0, ErrRemainingBitsUnavailable
+	}
+
+	remaining := uint64(len(cursor.source.data)) - cursor.offset
+	underlying := uint64(end - current)
+	if underlying > ^uint64(0)-remaining {
+		return 0, ErrBitCountOverflow
+	}
+	return remaining + underlying, nil
+}
+
 // NewReader returns a Reader that reads from in. Its defaults are MSBFirst and
 // BigEndian; configure them with WithBitOrder and WithByteOrder.
 func NewReader(in io.Reader, options ...Option) *Reader {
@@ -43,31 +172,66 @@ func NewReaderFromBytes(data []byte, options ...Option) *Reader {
 	return NewReader(bytes.NewReader(data), options...)
 }
 
+// Fork returns an independent copy of Reader at its current state. Reads from
+// either Reader do not advance the other. For a streaming source, bytes read
+// after the fork are retained so other forks can replay them. A Reader and its
+// forks must not be used concurrently.
+//
+// Fork returns nil when called on a nil Reader.
+func (reader *Reader) Fork() *Reader {
+	if reader == nil {
+		return nil
+	}
+
+	fork := *reader
+	if cursor, ok := reader.in.(*forkCursor); ok {
+		fork.in = cursor.clone()
+		return &fork
+	}
+	if reader.in == nil {
+		return &fork
+	}
+
+	source := &forkSource{in: reader.in}
+	reader.in = &forkCursor{source: source}
+	fork.in = &forkCursor{source: source}
+	return &fork
+}
+
+// ForkAndSkip returns an independent copy of Reader at its current state and
+// then skips byteCount logical bytes in the original Reader. If skipping fails,
+// the returned fork remains at the original position and the original Reader
+// remains advanced by the bytes or bits it consumed before the error.
+func (reader *Reader) ForkAndSkip(byteCount uint64) (*Reader, error) {
+	fork := reader.Fork()
+	return fork, reader.SkipBytes(byteCount)
+}
+
 // ReadBool reads one bit and returns true for a set bit.
 func (reader *Reader) ReadBool() (bool, error) {
 	return reader.readBit()
 }
 
-// ReadBits reads count bits and returns them in the low count bits of the
-// result. count must be between 1 and 64.
+// ReadBits reads bitCount bits and returns them in the low bitCount bits of the
+// result. bitCount must be between 1 and 64.
 //
-// With MSBFirst, the first stream bit becomes bit count-1 of the result. With
+// With MSBFirst, the first stream bit becomes bit bitCount-1 of the result. With
 // LSBFirst, it becomes bit 0. If EOF occurs before any requested bit is read,
 // ReadBits returns io.EOF. If EOF occurs after one or more requested bits have
 // been consumed, it returns io.ErrUnexpectedEOF. Other underlying errors are
 // returned unchanged. On any read error, Reader remains advanced by the bits
 // already consumed and ReadBits returns zero.
-func (reader *Reader) ReadBits(count uint8) (uint64, error) {
+func (reader *Reader) ReadBits(bitCount uint8) (uint64, error) {
 	if err := reader.readable(); err != nil {
 		return 0, err
 	}
-	if count == 0 || count > 64 {
+	if bitCount == 0 || bitCount > 64 {
 		return 0, ErrInvalidBitCount
 	}
 
 	var value uint64
 	if reader.order == MSBFirst {
-		for index := uint8(0); index < count; index++ {
+		for index := range bitCount {
 			bit, err := reader.readBit()
 			if err != nil {
 				return 0, readBitsError(err, index)
@@ -80,7 +244,7 @@ func (reader *Reader) ReadBits(count uint8) (uint64, error) {
 		return value, nil
 	}
 
-	for index := uint8(0); index < count; index++ {
+	for index := range bitCount {
 		bit, err := reader.readBit()
 		if err != nil {
 			return 0, readBitsError(err, index)
@@ -92,8 +256,8 @@ func (reader *Reader) ReadBits(count uint8) (uint64, error) {
 	return value, nil
 }
 
-func readBitsError(err error, consumed uint8) error {
-	if consumed > 0 && err == io.EOF {
+func readBitsError(err error, consumedBits uint8) error {
+	if consumedBits > 0 && err == io.EOF {
 		return io.ErrUnexpectedEOF
 	}
 	return err
@@ -136,25 +300,26 @@ func (reader *Reader) Read(data []byte) (int, error) {
 	return len(data), nil
 }
 
-// ReadBitsToSlice reads bits into a newly allocated packed byte slice. It
-// returns ceil(bits / 8) bytes. Each complete group of eight bits is a logical
-// byte; when bits is not a multiple of eight, the final byte contains the
-// remaining field value in its low bits according to ReadBits semantics.
+// ReadBitsToSlice reads bitCount bits into a newly allocated packed byte slice.
+// It returns ceil(bitCount / 8) bytes. Each complete group of eight bits is a
+// logical byte; when bitCount is not a multiple of eight, the final byte
+// contains the remaining field value in its low bits according to ReadBits
+// semantics.
 //
 // If the stream ends first, it returns the completed packed bytes and the read
 // error. A final partial group is omitted when it cannot be read completely.
-// bits must produce a slice length that fits in a Go int.
+// bitCount must produce a slice length that fits in a Go int.
 //
 // This method allocates the requested result before reading. Callers must
 // validate input-derived bit counts against an application-specific allocation
 // limit before calling it.
-func (reader *Reader) ReadBitsToSlice(bits uint64) ([]byte, error) {
+func (reader *Reader) ReadBitsToSlice(bitCount uint64) ([]byte, error) {
 	if err := reader.readable(); err != nil {
 		return nil, err
 	}
 
-	length := bits / 8
-	if bits%8 != 0 {
+	length := bitCount / 8
+	if bitCount%8 != 0 {
 		length++
 	}
 	if length > uint64(^uint(0)>>1) {
@@ -162,7 +327,7 @@ func (reader *Reader) ReadBitsToSlice(bits uint64) ([]byte, error) {
 	}
 
 	data := make([]byte, int(length))
-	fullBytes := int(bits / 8)
+	fullBytes := int(bitCount / 8)
 	for index := range fullBytes {
 		value, err := reader.ReadByte()
 		if err != nil {
@@ -171,7 +336,7 @@ func (reader *Reader) ReadBitsToSlice(bits uint64) ([]byte, error) {
 		data[index] = value
 	}
 
-	if remaining := uint8(bits % 8); remaining != 0 {
+	if remaining := uint8(bitCount % 8); remaining != 0 {
 		value, err := reader.ReadBits(remaining)
 		if err != nil {
 			return data[:fullBytes], err
@@ -181,22 +346,22 @@ func (reader *Reader) ReadBitsToSlice(bits uint64) ([]byte, error) {
 	return data, nil
 }
 
-// ReadBytesToSlice reads count logical bytes into a newly allocated slice.
+// ReadBytesToSlice reads byteCount logical bytes into a newly allocated slice.
 // If the stream ends first, it returns the bytes read and the read error.
-// count must fit in a Go slice length.
+// byteCount must fit in a Go slice length.
 //
 // This method allocates the requested result before reading. Callers must
 // validate input-derived byte counts against an application-specific allocation
 // limit before calling it.
-func (reader *Reader) ReadBytesToSlice(count uint64) ([]byte, error) {
+func (reader *Reader) ReadBytesToSlice(byteCount uint64) ([]byte, error) {
 	if err := reader.readable(); err != nil {
 		return nil, err
 	}
-	if count > uint64(^uint(0)>>1) {
+	if byteCount > uint64(^uint(0)>>1) {
 		return nil, ErrSliceLengthOverflow
 	}
 
-	data := make([]byte, int(count))
+	data := make([]byte, int(byteCount))
 	read, err := io.ReadFull(reader, data)
 	return data[:read], err
 }
@@ -243,7 +408,7 @@ func (reader *Reader) ReadStringToLength(length uint64) (string, error) {
 	}
 
 	data := make([]byte, 0, int(length))
-	for index := uint64(0); index < length; index++ {
+	for index := range length {
 		value, err := reader.ReadByte()
 		if err != nil {
 			if index > 0 && err == io.EOF {
@@ -265,33 +430,33 @@ func (reader *Reader) ReadStringToLength(length uint64) (string, error) {
 	return string(data), nil
 }
 
-// SkipBits consumes count bits without returning them. If an I/O error occurs,
+// SkipBits consumes bitCount bits without returning them. If an I/O error occurs,
 // Reader remains advanced by every bit consumed before that error.
-func (reader *Reader) SkipBits(count uint64) error {
+func (reader *Reader) SkipBits(bitCount uint64) error {
 	if err := reader.readable(); err != nil {
 		return err
 	}
 
-	if reader.hasByte && count > 0 {
+	if reader.hasByte && bitCount > 0 {
 		remaining := uint64(8 - reader.offset)
-		consumed := min(count, remaining)
+		consumed := min(bitCount, remaining)
 		reader.offset += uint8(consumed)
 		reader.position += consumed
-		count -= consumed
+		bitCount -= consumed
 		if reader.offset == 8 {
 			reader.clearCurrentByte()
 		}
 	}
 
-	bytesToSkip := count / 8
+	bytesToSkip := bitCount / 8
 	if bytesToSkip > 0 {
 		if err := reader.discardBytes(bytesToSkip); err != nil {
 			return err
 		}
-		count -= bytesToSkip * 8
+		bitCount -= bytesToSkip * 8
 	}
 
-	for range count {
+	for range bitCount {
 		if _, err := reader.readBit(); err != nil {
 			return err
 		}
@@ -299,13 +464,13 @@ func (reader *Reader) SkipBits(count uint64) error {
 	return nil
 }
 
-// SkipBytes consumes count logical bytes without returning them.
-func (reader *Reader) SkipBytes(count uint64) error {
+// SkipBytes consumes byteCount logical bytes without returning them.
+func (reader *Reader) SkipBytes(byteCount uint64) error {
 	const maxUint64 = ^uint64(0)
-	if count > maxUint64/8 {
+	if byteCount > maxUint64/8 {
 		return ErrBitCountOverflow
 	}
-	return reader.SkipBits(count * 8)
+	return reader.SkipBits(byteCount * 8)
 }
 
 // Align discards the unread bits in the current byte and returns their count.
@@ -337,6 +502,14 @@ func (reader *Reader) BitsRemaining() (uint64, error) {
 	if err := reader.readable(); err != nil {
 		return 0, err
 	}
+	if source, ok := reader.in.(remainingByteReader); ok {
+		remainingBytes, err := source.remainingBytes()
+		if err != nil {
+			return 0, err
+		}
+		return reader.bitsRemainingFromBytes(remainingBytes)
+	}
+
 	seeker, ok := reader.in.(io.Seeker)
 	if !ok {
 		return 0, ErrRemainingBitsUnavailable
@@ -357,8 +530,10 @@ func (reader *Reader) BitsRemaining() (uint64, error) {
 	if current < 0 || end < current {
 		return 0, ErrRemainingBitsUnavailable
 	}
+	return reader.bitsRemainingFromBytes(uint64(end - current))
+}
 
-	remainingBytes := uint64(end - current)
+func (reader *Reader) bitsRemainingFromBytes(remainingBytes uint64) (uint64, error) {
 	if remainingBytes > ^uint64(0)/8 {
 		return 0, ErrBitCountOverflow
 	}
@@ -566,16 +741,16 @@ func (reader *Reader) readBit() (bool, error) {
 	return value, nil
 }
 
-func (reader *Reader) discardBytes(count uint64) error {
+func (reader *Reader) discardBytes(byteCount uint64) error {
 	var discard [4096]byte
-	for count > 0 {
+	for byteCount > 0 {
 		chunkSize := len(discard)
-		if count < uint64(chunkSize) {
-			chunkSize = int(count)
+		if byteCount < uint64(chunkSize) {
+			chunkSize = int(byteCount)
 		}
 		read, err := io.ReadFull(reader.in, discard[:chunkSize])
 		reader.position += uint64(read) * 8
-		count -= uint64(read)
+		byteCount -= uint64(read)
 		if err != nil {
 			return err
 		}

@@ -104,6 +104,9 @@ convenience values equivalent to their `encoding/binary` counterparts.
 NewReader(in io.Reader, options ...Option) *Reader
 NewReaderFromBytes(data []byte, options ...Option) *Reader
 
+Fork() *Reader
+ForkAndSkip(byteCount uint64) (*Reader, error)
+
 BitPosition() uint64
 BitsRemaining() (uint64, error)
 ByteAligned() bool
@@ -117,23 +120,29 @@ consuming input, including unread bits in the current buffered byte. It
 requires an underlying `io.Seeker` (as provided by `NewReaderFromBytes`); for
 an ordinary streaming reader it returns `ErrRemainingBitsUnavailable`.
 
+`Fork` returns an independent reader at the current bit position. Reads from
+one fork do not advance another; for streaming inputs, bytes read after the
+fork are retained so other forks can replay them. A reader and its forks must
+not be used concurrently. `ForkAndSkip` returns that fork and then skips the
+requested number of logical bytes in the original reader.
+
 #### Error-returning reads
 
 ```go
 ReadBool() (bool, error)
-ReadBits(count uint8) (uint64, error)
+ReadBits(bitCount uint8) (uint64, error)
 ReadByte() (byte, error)
 Read(data []byte) (int, error)
-ReadBitsToSlice(bits uint64) ([]byte, error)
-ReadBytesToSlice(count uint64) ([]byte, error)
+ReadBitsToSlice(bitCount uint64) ([]byte, error)
+ReadBytesToSlice(byteCount uint64) ([]byte, error)
 ReadStringToNull() (string, error)
 ReadStringToLength(length uint64) (string, error)
 
 ReadUint8() (uint8, error)
 ReadInt8() (int8, error)
 
-SkipBits(count uint64) error
-SkipBytes(count uint64) error
+SkipBits(bitCount uint64) error
+SkipBytes(byteCount uint64) error
 Align() uint8
 ```
 
@@ -154,14 +163,14 @@ bits of a `uint64`. It returns `io.EOF` when no requested bit is available and
 returns zero and still advances the reader over its consumed bits. `Read`,
 `ReadByte`, and scalar methods assemble logical bytes from the next eight
 stream bits, so they also work at unaligned positions.
-`ReadBitsToSlice` accepts any `uint64` bit count and returns `ceil(bits / 8)`
+`ReadBitsToSlice` accepts any `uint64` bit count and returns `ceil(bitCount / 8)`
 packed bytes: complete groups are logical bytes, and a final incomplete group
 is stored in the low bits of the final byte using `ReadBits` bit-order
 semantics. `ReadBytesToSlice` reads the requested number of logical bytes.
 Both allocate their result, work at unaligned positions, and return only fully
 read output with the read error if input ends early; an unfinished final bit
-group is not included. A zero count returns an empty slice without consuming
-input. `ReadBitsToSlice` and `ReadBytesToSlice` allocate their requested result
+group is not included. A zero bit or byte count returns an empty slice without
+consuming input. `ReadBitsToSlice` and `ReadBytesToSlice` allocate their requested result
 before reading. `ReadStringToLength` allocates result capacity for the
 requested length. Callers must validate input-derived lengths against an
 application-specific allocation limit. The overflow checks only ensure that a
@@ -181,10 +190,10 @@ counterpart.
 
 ```go
 MustReadBool() bool
-MustReadBits(count uint8) uint64
+MustReadBits(bitCount uint8) uint64
 MustReadByte() byte
-MustReadBitsToSlice(bits uint64) []byte
-MustReadBytesToSlice(count uint64) []byte
+MustReadBitsToSlice(bitCount uint64) []byte
+MustReadBytesToSlice(byteCount uint64) []byte
 MustReadStringToNull() string
 MustReadStringToLength(length uint64) string
 
@@ -222,7 +231,7 @@ ByteOrder() ByteOrder
 
 ```go
 WriteBool(value bool) error
-WriteBits(value uint64, count uint8) error
+WriteBits(value uint64, bitCount uint8) error
 WriteByte(value byte) error
 Write(data []byte) (int, error)
 WriteString(value string) (int, error)
@@ -247,7 +256,7 @@ Close() error
 | `float64` | `WriteFloat64(value float64) error` | `WriteFloat64WithOrder(order ByteOrder, value float64) error` |
 
 `WriteBits` accepts counts from 1 through 64 and rejects a value that does not
-fit in `count` bits. `PadToByte` writes its value until the next byte boundary;
+fit in `bitCount` bits. `PadToByte` writes its value until the next byte boundary;
 `Align` does the same with zero bits. `Close` zero-pads a partial byte, writes
 it, and never closes the underlying `io.Writer`.
 `WriteString` writes the raw bytes of its argument and implements
@@ -260,7 +269,7 @@ counterpart.
 
 ```go
 MustWriteBool(value bool)
-MustWriteBits(value uint64, count uint8)
+MustWriteBits(value uint64, bitCount uint8)
 MustWriteByte(value byte)
 MustWrite(data []byte) int
 MustWriteString(value string) int
