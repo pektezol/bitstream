@@ -276,6 +276,253 @@ func TestBitsRemaining(t *testing.T) {
 	}
 }
 
+func TestReaderFork(t *testing.T) {
+	for _, order := range []BitOrder{MSBFirst, LSBFirst} {
+		t.Run(orderName(order), func(t *testing.T) {
+			reader := NewReader(
+				bytes.NewBuffer([]byte{0x96, 0x3c, 0xa5, 0x5a}),
+				WithBitOrder(order),
+				WithByteOrder(LittleEndian),
+			)
+			if _, err := reader.ReadBits(3); err != nil {
+				t.Fatalf("ReadBits prefix: %v", err)
+			}
+
+			fork := reader.Fork()
+			if got := fork.BitPosition(); got != 3 {
+				t.Fatalf("fork BitPosition = %d, want 3", got)
+			}
+			if !fork.BitOrder().valid() || fork.BitOrder() != order {
+				t.Fatalf("fork BitOrder = %v, want %v", fork.BitOrder(), order)
+			}
+			if got := fork.ByteOrder(); got != LittleEndian {
+				t.Fatalf("fork ByteOrder = %v, want LittleEndian", got)
+			}
+
+			forkValue, err := fork.ReadBits(13)
+			if err != nil {
+				t.Fatalf("fork ReadBits: %v", err)
+			}
+			readerValue, err := reader.ReadBits(13)
+			if err != nil {
+				t.Fatalf("reader ReadBits: %v", err)
+			}
+			if readerValue != forkValue {
+				t.Fatalf("independent ReadBits values = (%#x, %#x), want equal", readerValue, forkValue)
+			}
+			if got := reader.BitPosition(); got != 16 {
+				t.Fatalf("reader BitPosition = %d, want 16", got)
+			}
+			if got := fork.BitPosition(); got != 16 {
+				t.Fatalf("fork BitPosition = %d, want 16", got)
+			}
+
+			forkByte, err := fork.ReadByte()
+			if err != nil {
+				t.Fatalf("fork ReadByte: %v", err)
+			}
+			readerByte, err := reader.ReadByte()
+			if err != nil {
+				t.Fatalf("reader ReadByte: %v", err)
+			}
+			if readerByte != 0xa5 || forkByte != readerByte {
+				t.Fatalf("independent ReadByte values = (%#x, %#x), want (0xa5, 0xa5)", readerByte, forkByte)
+			}
+
+			branch := fork.Fork()
+			branchByte, err := branch.ReadByte()
+			if err != nil {
+				t.Fatalf("branch ReadByte: %v", err)
+			}
+			forkByte, err = fork.ReadByte()
+			if err != nil {
+				t.Fatalf("fork second ReadByte: %v", err)
+			}
+			readerByte, err = reader.ReadByte()
+			if err != nil {
+				t.Fatalf("reader second ReadByte: %v", err)
+			}
+			if branchByte != 0x5a || forkByte != branchByte || readerByte != branchByte {
+				t.Fatalf("branched ReadByte values = (%#x, %#x, %#x), want (0x5a, 0x5a, 0x5a)", branchByte, forkByte, readerByte)
+			}
+		})
+	}
+
+	reader := NewReaderFromBytes([]byte{0x12, 0x34}, WithByteOrder(LittleEndian))
+	fork := reader.Fork()
+	if value, err := fork.ReadUint16(); err != nil || value != 0x3412 {
+		t.Fatalf("fork ReadUint16 = (%#x, %v), want (0x3412, nil)", value, err)
+	}
+	if value, err := reader.ReadUint16(); err != nil || value != 0x3412 {
+		t.Fatalf("reader ReadUint16 = (%#x, %v), want (0x3412, nil)", value, err)
+	}
+}
+
+func TestReaderForkPreservesBitsRemaining(t *testing.T) {
+	reader := NewReaderFromBytes([]byte{0x96, 0x3c, 0xa5})
+	if _, err := reader.ReadBits(3); err != nil {
+		t.Fatalf("ReadBits prefix: %v", err)
+	}
+	fork := reader.Fork()
+
+	for name, current := range map[string]*Reader{"reader": reader, "fork": fork} {
+		if remaining, err := current.BitsRemaining(); err != nil || remaining != 21 {
+			t.Fatalf("%s BitsRemaining = (%d, %v), want (21, nil)", name, remaining, err)
+		}
+	}
+
+	if err := reader.SkipBytes(1); err != nil {
+		t.Fatalf("reader SkipBytes: %v", err)
+	}
+	if remaining, err := reader.BitsRemaining(); err != nil || remaining != 13 {
+		t.Fatalf("reader BitsRemaining = (%d, %v), want (13, nil)", remaining, err)
+	}
+	if remaining, err := fork.BitsRemaining(); err != nil || remaining != 21 {
+		t.Fatalf("fork BitsRemaining = (%d, %v), want (21, nil)", remaining, err)
+	}
+}
+
+func TestReaderForkAndSkip(t *testing.T) {
+	for _, order := range []BitOrder{MSBFirst, LSBFirst} {
+		t.Run(orderName(order), func(t *testing.T) {
+			data := []byte{0x96, 0x3c, 0xa5}
+			reader := NewReaderFromBytes(data, WithBitOrder(order))
+			if _, err := reader.ReadBits(3); err != nil {
+				t.Fatalf("ReadBits prefix: %v", err)
+			}
+
+			fork, err := reader.ForkAndSkip(1)
+			if err != nil {
+				t.Fatalf("ForkAndSkip: %v", err)
+			}
+			if got := fork.BitPosition(); got != 3 {
+				t.Fatalf("fork BitPosition = %d, want 3", got)
+			}
+			if got := reader.BitPosition(); got != 11 {
+				t.Fatalf("reader BitPosition = %d, want 11", got)
+			}
+
+			wantFork := NewReaderFromBytes(data, WithBitOrder(order))
+			if _, err := wantFork.ReadBits(3); err != nil {
+				t.Fatalf("expected fork prefix: %v", err)
+			}
+			wantForkValue, err := wantFork.ReadBits(8)
+			if err != nil {
+				t.Fatalf("expected fork ReadBits: %v", err)
+			}
+			forkValue, err := fork.ReadBits(8)
+			if err != nil || forkValue != wantForkValue {
+				t.Fatalf("fork ReadBits = (%#x, %v), want (%#x, nil)", forkValue, err, wantForkValue)
+			}
+
+			wantReader := NewReaderFromBytes(data, WithBitOrder(order))
+			if _, err := wantReader.ReadBits(3); err != nil {
+				t.Fatalf("expected reader prefix: %v", err)
+			}
+			if err := wantReader.SkipBytes(1); err != nil {
+				t.Fatalf("expected reader SkipBytes: %v", err)
+			}
+			wantReaderValue, err := wantReader.ReadBits(8)
+			if err != nil {
+				t.Fatalf("expected reader ReadBits: %v", err)
+			}
+			readerValue, err := reader.ReadBits(8)
+			if err != nil || readerValue != wantReaderValue {
+				t.Fatalf("reader ReadBits = (%#x, %v), want (%#x, nil)", readerValue, err, wantReaderValue)
+			}
+		})
+	}
+
+	t.Run("zero bytes", func(t *testing.T) {
+		reader := NewReaderFromBytes([]byte{0xab})
+		fork, err := reader.ForkAndSkip(0)
+		if err != nil {
+			t.Fatalf("ForkAndSkip: %v", err)
+		}
+		if got := reader.BitPosition(); got != 0 {
+			t.Fatalf("reader BitPosition = %d, want 0", got)
+		}
+		if got := fork.BitPosition(); got != 0 {
+			t.Fatalf("fork BitPosition = %d, want 0", got)
+		}
+		if value, err := fork.ReadByte(); err != nil || value != 0xab {
+			t.Fatalf("fork ReadByte = (%#x, %v), want (0xab, nil)", value, err)
+		}
+		if value, err := reader.ReadByte(); err != nil || value != 0xab {
+			t.Fatalf("reader ReadByte = (%#x, %v), want (0xab, nil)", value, err)
+		}
+	})
+}
+
+func TestReaderForkAndSkipFailure(t *testing.T) {
+	t.Run("partial EOF", func(t *testing.T) {
+		reader := NewReader(bytes.NewBuffer([]byte{0xab}))
+		fork, err := reader.ForkAndSkip(2)
+		if !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("ForkAndSkip error = %v, want io.ErrUnexpectedEOF", err)
+		}
+		if got := reader.BitPosition(); got != 8 {
+			t.Fatalf("reader BitPosition = %d, want 8", got)
+		}
+		if got := fork.BitPosition(); got != 0 {
+			t.Fatalf("fork BitPosition = %d, want 0", got)
+		}
+		if value, err := fork.ReadByte(); err != nil || value != 0xab {
+			t.Fatalf("fork ReadByte = (%#x, %v), want (0xab, nil)", value, err)
+		}
+		if _, err := fork.ReadByte(); !errors.Is(err, io.EOF) {
+			t.Fatalf("fork ReadByte error = %v, want io.EOF", err)
+		}
+	})
+
+	t.Run("byte-count overflow", func(t *testing.T) {
+		reader := NewReaderFromBytes([]byte{0xab})
+		fork, err := reader.ForkAndSkip(^uint64(0)/8 + 1)
+		if !errors.Is(err, ErrBitCountOverflow) {
+			t.Fatalf("ForkAndSkip error = %v, want %v", err, ErrBitCountOverflow)
+		}
+		if got := reader.BitPosition(); got != 0 {
+			t.Fatalf("reader BitPosition = %d, want 0", got)
+		}
+		if value, err := fork.ReadByte(); err != nil || value != 0xab {
+			t.Fatalf("fork ReadByte = (%#x, %v), want (0xab, nil)", value, err)
+		}
+	})
+}
+
+func TestReaderForkReplaysReadErrors(t *testing.T) {
+	injected := errors.New("injected read failure")
+	reader := NewReader(&errorAfterReader{data: []byte{0x80}, err: injected})
+	fork := reader.Fork()
+
+	if _, err := fork.ReadBits(9); !errors.Is(err, injected) {
+		t.Fatalf("fork ReadBits error = %v, want injected error", err)
+	}
+	if got := fork.BitPosition(); got != 8 {
+		t.Fatalf("fork BitPosition = %d, want 8", got)
+	}
+	if _, err := reader.ReadBits(9); !errors.Is(err, injected) {
+		t.Fatalf("reader ReadBits error = %v, want injected error", err)
+	}
+	if got := reader.BitPosition(); got != 8 {
+		t.Fatalf("reader BitPosition = %d, want 8", got)
+	}
+}
+
+func TestNilReaderFork(t *testing.T) {
+	var reader *Reader
+	if fork := reader.Fork(); fork != nil {
+		t.Fatalf("nil Reader Fork = %v, want nil", fork)
+	}
+	fork, err := reader.ForkAndSkip(0)
+	if fork != nil {
+		t.Fatalf("nil Reader ForkAndSkip fork = %v, want nil", fork)
+	}
+	if !errors.Is(err, ErrNilReader) {
+		t.Fatalf("nil Reader ForkAndSkip error = %v, want %v", err, ErrNilReader)
+	}
+}
+
 func TestReadBitsToSlice(t *testing.T) {
 	tests := []struct {
 		name   string

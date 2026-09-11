@@ -181,7 +181,7 @@ func fuzzFieldValue(count uint8) uint64 {
 
 func referenceReadBits(data []byte, start uint64, count uint8, order BitOrder) uint64 {
 	var value uint64
-	for index := uint8(0); index < count; index++ {
+	for index := range count {
 		position := start + uint64(index)
 		byteIndex := position / 8
 		offset := uint8(position % 8)

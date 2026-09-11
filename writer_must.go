@@ -7,9 +7,9 @@ func (writer *Writer) MustWriteBool(value bool) {
 	}
 }
 
-// MustWriteBits writes count bits and panics if they cannot be written.
-func (writer *Writer) MustWriteBits(value uint64, count uint8) {
-	if err := writer.WriteBits(value, count); err != nil {
+// MustWriteBits writes bitCount bits and panics if they cannot be written.
+func (writer *Writer) MustWriteBits(value uint64, bitCount uint8) {
+	if err := writer.WriteBits(value, bitCount); err != nil {
 		panic(err)
 	}
 }

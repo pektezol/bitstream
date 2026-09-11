@@ -9,9 +9,9 @@ func (reader *Reader) MustReadBool() bool {
 	return value
 }
 
-// MustReadBits reads count bits and panics if they cannot be read.
-func (reader *Reader) MustReadBits(count uint8) uint64 {
-	value, err := reader.ReadBits(count)
+// MustReadBits reads bitCount bits and panics if they cannot be read.
+func (reader *Reader) MustReadBits(bitCount uint8) uint64 {
+	value, err := reader.ReadBits(bitCount)
 	if err != nil {
 		panic(err)
 	}
@@ -27,20 +27,20 @@ func (reader *Reader) MustReadByte() byte {
 	return value
 }
 
-// MustReadBitsToSlice reads bits into a packed byte slice and panics if they
-// cannot be read.
-func (reader *Reader) MustReadBitsToSlice(bits uint64) []byte {
-	value, err := reader.ReadBitsToSlice(bits)
+// MustReadBitsToSlice reads bitCount bits into a packed byte slice and panics
+// if they cannot be read.
+func (reader *Reader) MustReadBitsToSlice(bitCount uint64) []byte {
+	value, err := reader.ReadBitsToSlice(bitCount)
 	if err != nil {
 		panic(err)
 	}
 	return value
 }
 
-// MustReadBytesToSlice reads count logical bytes into a newly allocated slice
+// MustReadBytesToSlice reads byteCount logical bytes into a newly allocated slice
 // and panics if they cannot be read.
-func (reader *Reader) MustReadBytesToSlice(count uint64) []byte {
-	value, err := reader.ReadBytesToSlice(count)
+func (reader *Reader) MustReadBytesToSlice(byteCount uint64) []byte {
+	value, err := reader.ReadBytesToSlice(byteCount)
 	if err != nil {
 		panic(err)
 	}

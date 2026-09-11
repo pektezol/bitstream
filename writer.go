@@ -45,26 +45,26 @@ func (writer *Writer) WriteBool(value bool) error {
 	return writer.writeBit(value)
 }
 
-// WriteBits writes the low count bits of value. count must be between 1 and
-// 64, and value must fit in count bits. Input validation happens before any
-// stream state changes.
+// WriteBits writes the low bitCount bits of value. bitCount must be between 1
+// and 64, and value must fit in bitCount bits. Input validation happens before
+// any stream state changes.
 //
-// With MSBFirst, bit count-1 is emitted first. With LSBFirst, bit 0 is emitted
-// first. If the underlying writer fails while a field is being written, some
-// field bits may already have been emitted and Writer becomes unusable.
-func (writer *Writer) WriteBits(value uint64, count uint8) error {
+// With MSBFirst, bit bitCount-1 is emitted first. With LSBFirst, bit 0 is
+// emitted first. If the underlying writer fails while a field is being written,
+// some field bits may already have been emitted and Writer becomes unusable.
+func (writer *Writer) WriteBits(value uint64, bitCount uint8) error {
 	if err := writer.writable(); err != nil {
 		return err
 	}
-	if count == 0 || count > 64 {
+	if bitCount == 0 || bitCount > 64 {
 		return ErrInvalidBitCount
 	}
-	if count < 64 && value>>count != 0 {
+	if bitCount < 64 && value>>bitCount != 0 {
 		return ErrValueOverflow
 	}
 
 	if writer.order == MSBFirst {
-		for index := count; index > 0; index-- {
+		for index := bitCount; index > 0; index-- {
 			if err := writer.writeBit(value&(uint64(1)<<(index-1)) != 0); err != nil {
 				return err
 			}
@@ -72,7 +72,7 @@ func (writer *Writer) WriteBits(value uint64, count uint8) error {
 		return nil
 	}
 
-	for index := uint8(0); index < count; index++ {
+	for index := range bitCount {
 		if err := writer.writeBit(value&(uint64(1)<<index) != 0); err != nil {
 			return err
 		}

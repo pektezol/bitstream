@@ -49,7 +49,7 @@ func BenchmarkReadBits(b *testing.B) {
 						b.SetBytes(int64(width))
 						b.ResetTimer()
 						for index := 0; index < b.N; index++ {
-							for field := 0; field < benchmarkFieldsPerOperation; field++ {
+							for range benchmarkFieldsPerOperation {
 								if remaining < uint64(width) {
 									reader = newReader()
 									remaining = uint64(len(data)) * 8
@@ -99,7 +99,7 @@ func BenchmarkWriteBits(b *testing.B) {
 						b.SetBytes(int64(width))
 						b.ResetTimer()
 						for index := 0; index < b.N; index++ {
-							for field := 0; field < benchmarkFieldsPerOperation; field++ {
+							for range benchmarkFieldsPerOperation {
 								if err := writer.WriteBits(value, width); err != nil {
 									b.Fatal(err)
 								}
