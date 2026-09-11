@@ -600,6 +600,19 @@ func TestStringHelpers(t *testing.T) {
 		t.Fatalf("short ReadStringToLength = (%q, %v), want (\"part\", io.ErrUnexpectedEOF)", value, err)
 	}
 
+	fixedNullReader := NewReaderFromBytes([]byte{'d', 'e', 'm', 'o', 0, 'x', 'y', 'z', 0xa5})
+	if value, err := fixedNullReader.ReadStringToLength(8); err != nil || value != "demo" {
+		t.Fatalf("null-terminated ReadStringToLength = (%q, %v), want (\"demo\", nil)", value, err)
+	}
+	if value, err := fixedNullReader.ReadByte(); err != nil || value != 0xa5 {
+		t.Fatalf("ReadStringToLength did not consume its fixed-width field: ReadByte = (%#x, %v), want (0xa5, nil)", value, err)
+	}
+
+	partialFixedNullReader := NewReaderFromBytes([]byte{'d', 'e', 'm', 'o', 0})
+	if value, err := partialFixedNullReader.ReadStringToLength(8); value != "demo" || !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("short null-terminated ReadStringToLength = (%q, %v), want (\"demo\", io.ErrUnexpectedEOF)", value, err)
+	}
+
 	overflowReader := NewReaderFromBytes([]byte{0x80})
 	if _, err := overflowReader.ReadStringToLength(^uint64(0)); !errors.Is(err, ErrStringLengthOverflow) {
 		t.Fatalf("overflow ReadStringToLength error = %v, want %v", err, ErrStringLengthOverflow)

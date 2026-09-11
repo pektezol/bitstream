@@ -161,15 +161,18 @@ semantics. `ReadBytesToSlice` reads the requested number of logical bytes.
 Both allocate their result, work at unaligned positions, and return only fully
 read output with the read error if input ends early; an unfinished final bit
 group is not included. A zero count returns an empty slice without consuming
-input. `ReadBitsToSlice`, `ReadBytesToSlice`, and `ReadStringToLength` allocate
-their requested result before reading; callers must validate input-derived
-lengths against an application-specific allocation limit. The overflow checks
-only ensure that a length fits in a Go slice, not that it is safe to allocate.
+input. `ReadBitsToSlice` and `ReadBytesToSlice` allocate their requested result
+before reading. `ReadStringToLength` allocates result capacity for the
+requested length. Callers must validate input-derived lengths against an
+application-specific allocation limit. The overflow checks only ensure that a
+length fits in a Go slice, not that it is safe to allocate.
 `ReadStringToNull` consumes but excludes its null terminator; if it is missing,
 it returns the partial string and the read error. It has no maximum length, so
 callers handling untrusted input should bound the source or otherwise enforce a
-string limit. `ReadStringToLength` reads the specified number of logical bytes
-and likewise returns a partial string on a read error.
+string limit. `ReadStringToLength` reads the specified number of logical bytes,
+returns only the bytes before its first null terminator, and likewise returns a
+partial string on a read error. It consumes the entire fixed-width field even
+after finding a null terminator.
 
 #### `Must` reads
 
