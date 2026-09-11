@@ -104,8 +104,12 @@ convenience values equivalent to their `encoding/binary` counterparts.
 NewReader(in io.Reader, options ...Option) *Reader
 NewReaderFromBytes(data []byte, options ...Option) *Reader
 
-Fork() *Reader
+CanFork() bool
+CanPeek() bool
+Fork() (*Reader, error)
 ForkAndSkip(byteCount uint64) (*Reader, error)
+PeekBits(bitCount uint8) (uint64, error)
+MustPeekBits(bitCount uint8) uint64
 
 BitPosition() uint64
 BitsRemaining() (uint64, error)
@@ -114,23 +118,40 @@ BitOrder() BitOrder
 ByteOrder() ByteOrder
 ```
 
-`NewReaderFromBytes` does not copy `data`. `BitPosition` includes bits
-discarded by `Align`. `BitsRemaining` reports unread bits through EOF without
-consuming input, including unread bits in the current buffered byte. It
-requires an underlying `io.Seeker` (as provided by `NewReaderFromBytes`); for
-an ordinary streaming reader it returns `ErrRemainingBitsUnavailable`.
+`NewReaderFromBytes(data, options...)` is a convenience wrapper around
+`NewReader(bytes.NewReader(data), options...)`; it retains `data` rather than
+copying it. `BitPosition` includes bits discarded by `Align`.
 
-`Fork` returns an independent reader at the current bit position. Reads from
-one fork do not advance another; for streaming inputs, bytes read after the
-fork are retained so other forks can replay them. A reader and its forks must
-not be used concurrently. `ForkAndSkip` returns that fork and then skips the
-requested number of logical bytes in the original reader.
+`NewReader` detects bounded random access when its source implements both
+`io.ReaderAt` and either `Size() int64` or `Stat()` for a regular file.
+`bytes.Reader`, `strings.Reader`, `io.SectionReader`, and regular files qualify
+automatically. A custom source can participate by exposing `Size() int64`.
+When the source is also an `io.Seeker`, its current offset becomes the reader's
+origin without changing that offset. The captured extent does not grow if the
+backing file grows, and the backing data must remain unchanged while the reader
+is in use.
+
+Bounded sources support independent `Fork` readers, bounded `ForkAndSkip`
+children, and non-consuming `PeekBits`. `ForkAndSkip(n)` limits the child to
+the next `n` logical bytes and advances the parent past them; if that extent is
+unavailable, it returns `io.ErrUnexpectedEOF` without changing the parent.
+`PeekBits` accepts 1 through 64 bits and preserves the reader's state on both
+success and failure. Streams return
+`ErrRandomAccessUnavailable` for those operations. Wrappers such as
+`bufio.Reader` hide the underlying random-access interfaces and therefore
+remain forward-only. `BitsRemaining` uses captured bounds for random-access
+sources; for other seekable sources it performs the existing non-consuming
+seeker query, and ordinary streams return `ErrRemainingBitsUnavailable`.
+`CanFork` and `CanPeek` report this bounded random-access capability without
+changing reader state; they have identical results and return false when
+initialization failed.
 
 #### Error-returning reads
 
 ```go
 ReadBool() (bool, error)
 ReadBits(bitCount uint8) (uint64, error)
+PeekBits(bitCount uint8) (uint64, error)
 ReadByte() (byte, error)
 Read(data []byte) (int, error)
 ReadBitsToSlice(bitCount uint64) ([]byte, error)
@@ -183,6 +204,9 @@ returns only the bytes before its first null terminator, and likewise returns a
 partial string on a read error. It consumes the entire fixed-width field even
 after finding a null terminator.
 
+For a bounded child, `Align` stops at the next original byte boundary or that
+child's end, whichever comes first.
+
 #### `Must` reads
 
 These methods panic with the original error returned by their error-returning
@@ -191,6 +215,7 @@ counterpart.
 ```go
 MustReadBool() bool
 MustReadBits(bitCount uint8) uint64
+MustPeekBits(bitCount uint8) uint64
 MustReadByte() byte
 MustReadBitsToSlice(bitCount uint64) []byte
 MustReadBytesToSlice(byteCount uint64) []byte
@@ -306,6 +331,8 @@ Operations can return underlying I/O errors and these exported sentinel errors:
 | `ErrStringLengthOverflow` | A requested string length cannot fit in a Go slice length. |
 | `ErrSliceLengthOverflow` | A requested byte or packed-bit slice length cannot fit in a Go slice length. |
 | `ErrRemainingBitsUnavailable` | The reader source cannot report its distance to EOF without consuming input. |
+| `ErrRandomAccessUnavailable` | Forking or peeking was requested for a forward-only reader. |
+| `ErrInvalidSize` | A random-access source reported a negative or inconsistent extent. |
 | `ErrClosed` | A write was attempted after `Close`. |
 | `ErrNilReader` | A reader has no usable source. |
 | `ErrNilWriter` | A writer has no usable sink. |

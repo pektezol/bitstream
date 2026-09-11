@@ -1,6 +1,7 @@
 package bitstream
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"testing"
@@ -22,7 +23,7 @@ func FuzzReadBitsTruncation(f *testing.F) {
 			return
 		}
 
-		reader := NewReaderFromBytes(data, WithBitOrder(order))
+		reader := NewReader(bytes.NewReader(data), WithBitOrder(order))
 		if prefix != 0 {
 			if _, err := reader.ReadBits(prefix); err != nil {
 				t.Fatalf("ReadBits(%d) prefix: %v", prefix, err)
@@ -108,6 +109,77 @@ func FuzzReadBitsInjectedFailure(f *testing.F) {
 		}
 		if got := reader.BitPosition(); got != totalBits {
 			t.Fatalf("BitPosition = %d, want %d", got, totalBits)
+		}
+	})
+}
+
+func FuzzBoundedForkAndPeek(f *testing.F) {
+	f.Add([]byte{}, uint8(0), uint8(0), uint8(0), uint8(0))
+	f.Add([]byte{0xa5}, uint8(0), uint8(3), uint8(8), uint8(1))
+	f.Add([]byte{0xa5, 0x5a, 0x3c}, uint8(1), uint8(5), uint8(13), uint8(2))
+
+	f.Fuzz(func(t *testing.T, data []byte, orderCode, prefixCode, countCode, childBytesCode uint8) {
+		data = limitFuzzData(data)
+		order := fuzzBitOrder(orderCode)
+		prefix := uint64(prefixCode % 8)
+		totalBits := uint64(len(data)) * 8
+		if prefix > totalBits {
+			return
+		}
+
+		reader := NewReader(bytes.NewReader(data), WithBitOrder(order))
+		if err := reader.SkipBits(prefix); err != nil {
+			t.Fatalf("SkipBits(%d): %v", prefix, err)
+		}
+
+		count := countCode%64 + 1
+		beforePosition := reader.BitPosition()
+		value, err := reader.PeekBits(count)
+		remaining := totalBits - prefix
+		if uint64(count) <= remaining {
+			want := referenceReadBits(data, prefix, count, order)
+			if err != nil || value != want {
+				t.Fatalf("PeekBits(%d) = (%#x, %v), want (%#x, nil)", count, value, err, want)
+			}
+		} else {
+			wantErr := io.ErrUnexpectedEOF
+			if remaining == 0 {
+				wantErr = io.EOF
+			}
+			if value != 0 || !errors.Is(err, wantErr) {
+				t.Fatalf("PeekBits(%d) = (%#x, %v), want (0, %v)", count, value, err, wantErr)
+			}
+		}
+		if got := reader.BitPosition(); got != beforePosition {
+			t.Fatalf("PeekBits changed position to %d, want %d", got, beforePosition)
+		}
+
+		childBytes := uint64(childBytesCode % 10)
+		child, err := reader.ForkAndSkip(childBytes)
+		childBits := childBytes * 8
+		if childBits > remaining {
+			if child != nil || !errors.Is(err, io.ErrUnexpectedEOF) {
+				t.Fatalf("ForkAndSkip(%d) = (%v, %v), want (nil, io.ErrUnexpectedEOF)", childBytes, child, err)
+			}
+			if got := reader.BitPosition(); got != beforePosition {
+				t.Fatalf("failed ForkAndSkip changed position to %d, want %d", got, beforePosition)
+			}
+			return
+		}
+		if err != nil {
+			t.Fatalf("ForkAndSkip(%d): %v", childBytes, err)
+		}
+		if got := reader.BitPosition(); got != prefix+childBits {
+			t.Fatalf("parent BitPosition = %d, want %d", got, prefix+childBits)
+		}
+		if childBits == 0 {
+			if _, err := child.ReadBool(); !errors.Is(err, io.EOF) {
+				t.Fatalf("zero-length child read error = %v, want io.EOF", err)
+			}
+			return
+		}
+		if value, err := child.ReadBits(uint8(min(childBits, 64))); err != nil || value != referenceReadBits(data, prefix, uint8(min(childBits, 64)), order) {
+			t.Fatalf("child ReadBits = (%#x, %v), want (%#x, nil)", value, err, referenceReadBits(data, prefix, uint8(min(childBits, 64)), order))
 		}
 	})
 }
