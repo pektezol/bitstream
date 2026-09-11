@@ -225,13 +225,15 @@ func (reader *Reader) ReadStringToNull() (string, error) {
 	}
 }
 
-// ReadStringToLength reads length logical bytes and returns them as a string.
-// If the stream ends first, it returns the partial string and the read error.
-// length must fit in a Go slice length.
+// ReadStringToLength reads length logical bytes and returns the bytes through
+// the first null byte as a string. It still consumes all length bytes, so a
+// null-terminated string stored in a fixed-width field does not misalign the
+// next read. If the stream ends first, it returns the partial string and the
+// read error. length must fit in a Go slice length.
 //
-// This method allocates the requested result before reading. Callers must
-// validate input-derived lengths against an application-specific allocation
-// limit before calling it.
+// This method allocates result capacity for length bytes before reading.
+// Callers must validate input-derived lengths against an application-specific
+// allocation limit before calling it.
 func (reader *Reader) ReadStringToLength(length uint64) (string, error) {
 	if err := reader.readable(); err != nil {
 		return "", err
@@ -240,9 +242,27 @@ func (reader *Reader) ReadStringToLength(length uint64) (string, error) {
 		return "", ErrStringLengthOverflow
 	}
 
-	data := make([]byte, int(length))
-	count, err := io.ReadFull(reader, data)
-	return string(data[:count]), err
+	data := make([]byte, 0, int(length))
+	for index := uint64(0); index < length; index++ {
+		value, err := reader.ReadByte()
+		if err != nil {
+			if index > 0 && err == io.EOF {
+				err = io.ErrUnexpectedEOF
+			}
+			return string(data), err
+		}
+		if value == 0 {
+			if err := reader.SkipBytes(length - index - 1); err != nil {
+				if err == io.EOF {
+					err = io.ErrUnexpectedEOF
+				}
+				return string(data), err
+			}
+			return string(data), nil
+		}
+		data = append(data, value)
+	}
+	return string(data), nil
 }
 
 // SkipBits consumes count bits without returning them. If an I/O error occurs,
