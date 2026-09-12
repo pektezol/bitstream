@@ -118,7 +118,7 @@ func FuzzBoundedForkAndPeek(f *testing.F) {
 	f.Add([]byte{0xa5}, uint8(0), uint8(3), uint8(8), uint8(1))
 	f.Add([]byte{0xa5, 0x5a, 0x3c}, uint8(1), uint8(5), uint8(13), uint8(2))
 
-	f.Fuzz(func(t *testing.T, data []byte, orderCode, prefixCode, countCode, childBytesCode uint8) {
+	f.Fuzz(func(t *testing.T, data []byte, orderCode, prefixCode, countCode, childBitsCode uint8) {
 		data = limitFuzzData(data)
 		order := fuzzBitOrder(orderCode)
 		prefix := uint64(prefixCode % 8)
@@ -154,12 +154,11 @@ func FuzzBoundedForkAndPeek(f *testing.F) {
 			t.Fatalf("PeekBits changed position to %d, want %d", got, beforePosition)
 		}
 
-		childBytes := uint64(childBytesCode % 10)
-		child, err := reader.ForkAndSkip(childBytes)
-		childBits := childBytes * 8
+		childBits := uint64(childBitsCode % 65)
+		child, err := reader.ForkAndSkip(childBits)
 		if childBits > remaining {
 			if child != nil || !errors.Is(err, io.ErrUnexpectedEOF) {
-				t.Fatalf("ForkAndSkip(%d) = (%v, %v), want (nil, io.ErrUnexpectedEOF)", childBytes, child, err)
+				t.Fatalf("ForkAndSkip(%d) = (%v, %v), want (nil, io.ErrUnexpectedEOF)", childBits, child, err)
 			}
 			if got := reader.BitPosition(); got != beforePosition {
 				t.Fatalf("failed ForkAndSkip changed position to %d, want %d", got, beforePosition)
@@ -167,7 +166,7 @@ func FuzzBoundedForkAndPeek(f *testing.F) {
 			return
 		}
 		if err != nil {
-			t.Fatalf("ForkAndSkip(%d): %v", childBytes, err)
+			t.Fatalf("ForkAndSkip(%d): %v", childBits, err)
 		}
 		if got := reader.BitPosition(); got != prefix+childBits {
 			t.Fatalf("parent BitPosition = %d, want %d", got, prefix+childBits)

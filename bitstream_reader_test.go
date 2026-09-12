@@ -124,7 +124,7 @@ func TestRandomAccessBoundsAndNoIOSkips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Fork: %v", err)
 	}
-	child, err := reader.ForkAndSkip(1)
+	child, err := reader.ForkAndSkip(8)
 	if err != nil {
 		t.Fatalf("ForkAndSkip: %v", err)
 	}
@@ -161,11 +161,11 @@ func TestForkAndSkipNestedBoundsAndAlignment(t *testing.T) {
 			if err := parent.SkipBits(3); err != nil {
 				t.Fatalf("SkipBits: %v", err)
 			}
-			first, err := parent.ForkAndSkip(2)
+			first, err := parent.ForkAndSkip(16)
 			if err != nil {
 				t.Fatalf("first ForkAndSkip: %v", err)
 			}
-			second, err := first.ForkAndSkip(1)
+			second, err := first.ForkAndSkip(8)
 			if err != nil {
 				t.Fatalf("second ForkAndSkip: %v", err)
 			}
@@ -192,7 +192,7 @@ func TestForkAndSkipNestedBoundsAndAlignment(t *testing.T) {
 			if err := alignReader.SkipBits(3); err != nil {
 				t.Fatalf("align SkipBits: %v", err)
 			}
-			limited, err := alignReader.ForkAndSkip(1)
+			limited, err := alignReader.ForkAndSkip(8)
 			if err != nil {
 				t.Fatalf("align ForkAndSkip: %v", err)
 			}
@@ -230,7 +230,7 @@ func TestBoundedReadConsumesPartialLogicalByte(t *testing.T) {
 	if err := reader.SkipBits(3); err != nil {
 		t.Fatalf("SkipBits: %v", err)
 	}
-	child, err := reader.ForkAndSkip(1)
+	child, err := reader.ForkAndSkip(8)
 	if err != nil {
 		t.Fatalf("ForkAndSkip: %v", err)
 	}
