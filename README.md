@@ -107,7 +107,7 @@ NewReaderFromBytes(data []byte, options ...Option) *Reader
 CanFork() bool
 CanPeek() bool
 Fork() (*Reader, error)
-ForkAndSkip(byteCount uint64) (*Reader, error)
+ForkAndSkip(bitCount uint64) (*Reader, error)
 PeekBits(bitCount uint8) (uint64, error)
 MustPeekBits(bitCount uint8) uint64
 
@@ -133,7 +133,7 @@ is in use.
 
 Bounded sources support independent `Fork` readers, bounded `ForkAndSkip`
 children, and non-consuming `PeekBits`. `ForkAndSkip(n)` limits the child to
-the next `n` logical bytes and advances the parent past them; if that extent is
+the next `n` stream bits and advances the parent past them; if that extent is
 unavailable, it returns `io.ErrUnexpectedEOF` without changing the parent.
 `PeekBits` accepts 1 through 64 bits and preserves the reader's state on both
 success and failure. Streams return

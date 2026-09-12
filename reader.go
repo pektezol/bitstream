@@ -89,20 +89,16 @@ func (reader *Reader) Fork() (*Reader, error) {
 	return &fork, nil
 }
 
-// ForkAndSkip returns a child limited to the next byteCount logical bytes and
-// advances Reader past those bytes. The operation is atomic: on error Reader is
+// ForkAndSkip returns a child limited to the next bitCount stream bits and
+// advances Reader past those bits. The operation is atomic: on error Reader is
 // unchanged and no child is returned.
-func (reader *Reader) ForkAndSkip(byteCount uint64) (*Reader, error) {
+func (reader *Reader) ForkAndSkip(bitCount uint64) (*Reader, error) {
 	if err := reader.readable(); err != nil {
 		return nil, err
 	}
 	if !reader.random {
 		return nil, ErrRandomAccessUnavailable
 	}
-	if byteCount > ^uint64(0)/8 {
-		return nil, ErrBitCountOverflow
-	}
-	bitCount := byteCount * 8
 	if bitCount > reader.limit-reader.position {
 		return nil, io.ErrUnexpectedEOF
 	}
