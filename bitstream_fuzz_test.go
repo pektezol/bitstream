@@ -127,7 +127,12 @@ func FuzzBoundedForkAndPeek(f *testing.F) {
 			return
 		}
 
-		reader := NewReader(bytes.NewReader(data), WithBitOrder(order))
+		var source io.Reader = bytes.NewReader(data)
+		if orderCode&2 != 0 {
+			// SectionReader exercises the read-ahead path; bytes.Reader bypasses it.
+			source = io.NewSectionReader(bytes.NewReader(data), 0, int64(len(data)))
+		}
+		reader := NewReader(source, WithBitOrder(order))
 		if err := reader.SkipBits(prefix); err != nil {
 			t.Fatalf("SkipBits(%d): %v", prefix, err)
 		}

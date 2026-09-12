@@ -5,6 +5,7 @@ import (
 	"io"
 	"io/fs"
 	"math"
+	"strings"
 )
 
 // Reader reads a sequence of bits from an io.Reader.
@@ -14,21 +15,30 @@ import (
 // bits into each returned byte, so they work at non-byte-aligned positions.
 // When NewReader detects a bounded io.ReaderAt source, Reader uses ReadAt and
 // supports forks and peeks without changing the source's seek position.
+// Small reads use a lazy 32 KiB read-ahead window, except for bytes.Reader and
+// strings.Reader sources, which already read directly from memory.
 type Reader struct {
-	in        io.Reader
-	at        io.ReaderAt
-	order     BitOrder
-	byteOrder ByteOrder
-	current   byte
-	offset    uint8
-	hasByte   bool
-	position  uint64
-	limit     uint64
-	origin    int64
-	random    bool
-	initErr   error
-	single    [1]byte
+	in           io.Reader
+	at           io.ReaderAt
+	order        BitOrder
+	byteOrder    ByteOrder
+	current      byte
+	offset       uint8
+	hasByte      bool
+	position     uint64
+	limit        uint64
+	origin       int64
+	random       bool
+	initErr      error
+	single       [1]byte
+	buffered     bool
+	window       []byte
+	windowStart  int64
+	windowErr    error
+	windowShared bool
 }
+
+const readerWindowSize = 32 * 1024
 
 type sizedReader interface {
 	Size() int64
@@ -85,6 +95,7 @@ func (reader *Reader) Fork() (*Reader, error) {
 	if !reader.random {
 		return nil, ErrRandomAccessUnavailable
 	}
+	reader.shareWindow()
 	fork := *reader
 	return &fork, nil
 }
@@ -103,6 +114,7 @@ func (reader *Reader) ForkAndSkip(bitCount uint64) (*Reader, error) {
 		return nil, io.ErrUnexpectedEOF
 	}
 
+	reader.shareWindow()
 	fork := *reader
 	fork.limit = reader.position + bitCount
 	reader.advanceRandom(bitCount)
@@ -121,8 +133,13 @@ func (reader *Reader) PeekBits(bitCount uint8) (uint64, error) {
 	if !reader.random {
 		return 0, ErrRandomAccessUnavailable
 	}
+	reader.shareWindow()
 	peek := *reader
-	return peek.ReadBits(bitCount)
+	value, err := peek.ReadBits(bitCount)
+	// Keep read-ahead from peeks while leaving the logical cursor untouched.
+	reader.window, reader.windowStart = peek.window, peek.windowStart
+	reader.windowErr, reader.windowShared = peek.windowErr, peek.windowShared
+	return value, err
 }
 
 // ReadBool reads one bit and returns true for a set bit.
@@ -661,7 +678,7 @@ func (reader *Reader) readBit() (bool, error) {
 	}
 	if !reader.hasByte {
 		if reader.random {
-			count, err := reader.at.ReadAt(reader.single[:], reader.origin+int64(reader.position/8))
+			count, err := reader.readAt(reader.single[:])
 			if count < 0 || count > len(reader.single) {
 				return false, errInvalidRead
 			}
@@ -707,7 +724,7 @@ func (reader *Reader) readRandom(data []byte) (int, error) {
 		count = int(availableBytes)
 	}
 
-	read, err := reader.at.ReadAt(data[:count], reader.origin+int64(reader.position/8))
+	read, err := reader.readAt(data[:count])
 	if read < 0 || read > count {
 		return 0, errInvalidRead
 	}
@@ -773,6 +790,67 @@ func (reader *Reader) clearCurrentByte() {
 	reader.hasByte = false
 }
 
+func (reader *Reader) shareWindow() {
+	if reader.window != nil {
+		reader.windowShared = true
+	}
+}
+
+// readAt buffers small random-access reads. Shared windows are immutable;
+// each cursor allocates its own replacement on its next cache miss.
+func (reader *Reader) readAt(data []byte) (int, error) {
+	offset := reader.origin + int64(reader.position/8)
+	if !reader.buffered {
+		return reader.at.ReadAt(data, offset)
+	}
+	end := reader.windowStart + int64(len(reader.window))
+	if offset >= reader.windowStart && offset < end {
+		n := copy(data, reader.window[offset-reader.windowStart:])
+		if offset+int64(n) == end {
+			return n, reader.windowErr
+		}
+		return n, nil
+	}
+	if len(data) >= readerWindowSize {
+		return reader.at.ReadAt(data, offset)
+	}
+	// Include the last partial byte, but never read beyond this cursor's bound.
+	endByte := reader.limit / 8
+	if reader.limit%8 != 0 {
+		endByte++
+	}
+	remaining := int64(endByte - reader.position/8)
+	size := int(min(int64(readerWindowSize), remaining))
+	if reader.windowShared || cap(reader.window) < size {
+		reader.window = make([]byte, size)
+	} else {
+		reader.window = reader.window[:size]
+	}
+	reader.windowShared = false
+	reader.windowStart = offset
+	n, err := reader.at.ReadAt(reader.window, offset)
+	if n < 0 || n > size {
+		reader.window = reader.window[:0]
+		reader.windowErr = nil
+		return 0, errInvalidRead
+	}
+	reader.window = reader.window[:n]
+	if n < size && err == nil {
+		err = io.ErrUnexpectedEOF
+	}
+	reader.windowErr = err
+	if n == 0 {
+		// A failed read must not prevent a later retry (including after a peek).
+		reader.windowErr = nil
+		return 0, err
+	}
+	count := copy(data, reader.window)
+	if count == n {
+		return count, err
+	}
+	return count, nil
+}
+
 func (reader *Reader) detectRandomAccess() error {
 	at, ok := reader.in.(io.ReaderAt)
 	if !ok {
@@ -823,5 +901,11 @@ func (reader *Reader) detectRandomAccess() error {
 	reader.origin = origin
 	reader.limit = available * 8
 	reader.random = true
+	switch reader.in.(type) {
+	case *bytes.Reader, *strings.Reader:
+		// These sources already serve reads directly from memory.
+	default:
+		reader.buffered = true
+	}
 	return nil
 }

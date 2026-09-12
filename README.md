@@ -131,6 +131,17 @@ origin without changing that offset. The captured extent does not grow if the
 backing file grows, and the backing data must remain unchanged while the reader
 is in use.
 
+Bounded random-access sources use a lazily allocated 32 KiB read-ahead window
+for bit reads and small byte-oriented reads. `bytes.Reader` and `strings.Reader`
+already read from memory and bypass this window. Large aligned reads bypass
+the window when the requested position is not cached. Forks share loaded
+windows without copying; on refill, shared storage is replaced so each fork
+keeps independent data. Peeks retain read-ahead without advancing the bit
+position. Skips do not fetch data, and the library does not load whole files
+automatically. To explicitly load an input into memory, pass the resulting
+slice to `NewReaderFromBytes`. Forward-only inputs still require caller-supplied
+buffering, such as `bufio.Reader`, to avoid small underlying reads.
+
 Bounded sources support independent `Fork` readers, bounded `ForkAndSkip`
 children, and non-consuming `PeekBits`. `ForkAndSkip(n)` limits the child to
 the next `n` stream bits and advances the parent past them; if that extent is
